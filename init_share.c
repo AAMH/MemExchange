@@ -141,8 +141,8 @@ int main(int argc, char **argv)
         track[i]->max_id = -1;
     }
 
-    track[0]->preset_share[0] = 0.257 * mem_allocated;
-    track[0]->preset_share[1] = 0.257 * mem_allocated;
+    track[0]->preset_share[0] = 0.5 * mem_allocated;
+    track[0]->preset_share[1] = 0.5 * mem_allocated;
     track[0]->preset_share[2] = 0.23 * mem_allocated;
     track[0]->preset_share[3] = 0.256 * mem_allocated;
 

@@ -1,5 +1,11 @@
 {
     "files.associations": {
-        "memcached.h": "c"
+        "memcached.h": "c",
+        "ctype.h": "c",
+        "slabs.h": "c",
+        "time.h": "c",
+        "rdma_util.h": "c",
+        "rdma_cma.h": "c",
+        "shm_malloc.h": "c"
     }
 }

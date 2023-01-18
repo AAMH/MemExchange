@@ -16,6 +16,8 @@
 
 #define ITEMS_PER_ALLOC 64
 
+hash_func hash;
+
 /* An item in the connection queue. */
 typedef struct conn_queue_item CQ_ITEM;
 struct conn_queue_item {

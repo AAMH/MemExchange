@@ -13,6 +13,8 @@
 #include <sys/stat.h>
 #include <semaphore.h>
 
+char tracker_name[20], semaph_name[20], slab_name[20];
+
 void * shm_malloc(size_t n) {
 //    pthread_mutex_t shm_lock = PTHREAD_MUTEX_INITIALIZER;
     int tracker_fd;

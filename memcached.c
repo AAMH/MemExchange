@@ -83,6 +83,19 @@ static int start_conn_timeout_thread();
 static int start_file_write_thread();
 static int start_marginal_utility_thread();
 
+
+/* RDMA stuff*/
+const int TIMEOUT_IN_MS = 500; /* ms */
+
+static int on_connect_request(struct rdma_cm_id *id);
+static int on_addr_resolved(struct rdma_cm_id *id);
+static int on_connection(struct rdma_cm_id *id);
+static int on_disconnect(struct rdma_cm_id *id);
+static int on_event(struct rdma_cm_event *event);
+static int on_route_resolved(struct rdma_cm_id *id);
+//static void usage(const char *argv0);
+static int start_rdma_connection_handler_thread();
+
 /* stats */
 static void stats_init(void);
 static void server_stats(ADD_STAT add_stats, conn *c);
@@ -395,16 +408,16 @@ static pthread_t file_write_tid;
 
 static void *file_write_thread(void *arg) {
     
-    int sleep_time = 1;
+    //int sleep_time = 1;
     
-    char file_path_hit[100],file_path_memory[100],file_path_stat[100];;
-     mkdir("/users/AMH/Log",0755);
-     mkdir("/users/AMH/Log/HitRatio",0755);
-     mkdir("/users/AMH/Log/Memory",0755);
-     mkdir("/users/AMH/Log/Stats",0755);
-     sprintf(file_path_hit,"/users/AMH/Log/HitRatio/hit_rate_stats_%d.csv\0",(settings.port - 11212));
-     sprintf(file_path_memory,"/users/AMH/Log/Memory/memory_stats_%d.csv\0",(settings.port - 11212));
-     sprintf(file_path_stat,"/users/AMH/Log/Stats/stat_stats_%d.csv\0",(settings.port - 11212));
+   // char file_path_hit[100],file_path_memory[100],file_path_stat[100];;
+     //mkdir("/users/AMH/Log",0755);
+     //mkdir("/users/AMH/Log/HitRatio",0755);
+     //mkdir("/users/AMH/Log/Memory",0755);
+     //mkdir("/users/AMH/Log/Stats",0755);
+     //sprintf(file_path_hit,"/users/AMH/Log/HitRatio/hit_rate_stats_%d.csv\0",(settings.port - 11212));
+     //sprintf(file_path_memory,"/users/AMH/Log/Memory/memory_stats_%d.csv\0",(settings.port - 11212));
+     //sprintf(file_path_stat,"/users/AMH/Log/Stats/stat_stats_%d.csv\0",(settings.port - 11212));
 
     //mkdir("~/Log",0755);
     //mkdir("~/Log/HitRatio",0755);
@@ -412,39 +425,39 @@ static void *file_write_thread(void *arg) {
     //sprintf(file_path_hit,"~/Log/HitRatio/hit_rate_stats_%d.csv\0",(settings.port - 11212));
     //sprintf(file_path_memory,"~/Log/Memory/memory_stats_%d.csv\0",(settings.port - 11212));
     
-    FILE *f = fopen(file_path_hit,"w");
-    FILE *f2 = fopen(file_path_memory,"w");
-    FILE *f3 = fopen(file_path_stat,"w");
+    //FILE *f = fopen(file_path_hit,"w");
+    //FILE *f2 = fopen(file_path_memory,"w");
+    //FILE *f3 = fopen(file_path_stat,"w");
 
-    fprintf(f,"total,class_2,class_3,class_4,class_5,class_6,class_7,class_8,class_9\n");
-    fprintf(f2,"total,class_2,class_3,class_4,class_5,class_6,class_7,class_8,class_9\n");
-    fprintf(f3,"total,hits\n");
+    //fprintf(f,"total,class_2,class_3,class_4,class_5,class_6,class_7,class_8,class_9\n");
+    //fprintf(f2,"total,class_2,class_3,class_4,class_5,class_6,class_7,class_8,class_9\n");
+    //fprintf(f3,"total,hits\n");
 
-    struct thread_stats thread_stats;
-    struct slab_stats slab_stats;
+    //struct thread_stats thread_stats;
+    //struct slab_stats slab_stats;
 
-    while(1) {
+    //while(1) {
        
-        sleep(sleep_time);
+       // sleep(sleep_time);
 
-        threadlocal_stats_aggregate(&thread_stats);
-        slab_stats_aggregate(&thread_stats, &slab_stats);
+      //  threadlocal_stats_aggregate(&thread_stats);
+       // slab_stats_aggregate(&thread_stats, &slab_stats);
 
-        if(thread_stats.get_cmds)
-            fprintf(f,"%.2f,",(double)slab_stats.get_hits / (double)thread_stats.get_cmds * 100);
+      //  if(thread_stats.get_cmds)
+         //   fprintf(f,"%.2f,",(double)slab_stats.get_hits / (double)thread_stats.get_cmds * 100);
         
-        fprintf(f3,"%lu,%lu\n", thread_stats.get_cmds, slab_stats.get_hits);
+       // fprintf(f3,"%lu,%lu\n", thread_stats.get_cmds, slab_stats.get_hits);
         
-        slabs_stats_file_write(f,f2,thread_stats);
+       // slabs_stats_file_write(f,f2,thread_stats);
         
-        fflush(f);
-        fflush(f2);
-        fflush(f3);
-    }
+       // fflush(f);
+       // fflush(f2);
+       // fflush(f3);
+   // }
     
-    fclose(f);
-    fclose(f2);
-    fclose(f3);
+    //fclose(f);
+    //fclose(f2);
+    //fclose(f3);
     return NULL;
 }
 
@@ -506,6 +519,157 @@ static int start_marginal_utility_thread() {
 
     return 0;
 }
+
+/* RDMA connection event handler thread */
+
+static pthread_t rdma_connection_handler_tid;
+
+static void *rdma_connection_handler_thread(){
+
+    bool transfer_mode = false; // Write or Read
+    bool server_mode = true; // Server or Client
+    struct sockaddr_in6 client_addr;
+    struct addrinfo *server_addr;
+    struct rdma_cm_event *event = NULL;
+    struct rdma_cm_id *conn = NULL;
+    struct rdma_event_channel *ec = NULL;
+    uint16_t port = 0;
+
+
+    if (transfer_mode)
+        set_mode(M_WRITE);
+    else
+        set_mode(M_READ);
+
+    memset(&client_addr, 0, sizeof(client_addr));
+    client_addr.sin6_family = AF_INET6;
+
+    //TEST_NZ(getaddrinfo(argv[2], argv[3], NULL, &server_addr));
+    TEST_NZ(getaddrinfo("localhost", "11212", NULL, &server_addr));
+
+    TEST_Z(ec = rdma_create_event_channel());
+    TEST_NZ(rdma_create_id(ec, &conn, NULL, RDMA_PS_TCP));
+ 
+    if (server_mode) {
+        TEST_NZ(rdma_bind_addr(conn, (struct sockaddr *)&client_addr));
+        TEST_NZ(rdma_listen(conn, 10)); /* backlog=10 is arbitrary */
+
+        port = ntohs(rdma_get_src_port(conn));
+        printf("listening on port %d.\n", port);
+    }
+
+    else {
+        TEST_NZ(rdma_resolve_addr(conn, NULL, server_addr->ai_addr, TIMEOUT_IN_MS));
+        freeaddrinfo(server_addr);
+    }
+
+    printf("listening on port %d.\n", port);
+
+    while(1){
+        while (rdma_get_cm_event(ec, &event) == 0) {
+            struct rdma_cm_event event_copy;
+
+            memcpy(&event_copy, event, sizeof(*event));
+            rdma_ack_cm_event(event);
+
+            if (on_event(&event_copy))
+            break;
+        }
+        }
+
+    rdma_destroy_id(conn);
+    rdma_destroy_event_channel(ec);
+}
+
+static int start_rdma_connection_handler_thread(){
+    int ret;
+
+    if ((ret = pthread_create(&rdma_connection_handler_tid, NULL,
+        rdma_connection_handler_thread, NULL)) != 0) {
+        fprintf(stderr, "Can't create rdma_connection_handler thread: %s\n",
+            strerror(ret));
+        return -1;
+    }
+
+    return 0;
+}
+
+int on_addr_resolved(struct rdma_cm_id *id)
+{
+    printf("address resolved.\n");
+
+    build_connection(id);
+    sprintf(get_local_message_region(id->context), "message from active/client side with pid %d", getpid());
+    TEST_NZ(rdma_resolve_route(id, TIMEOUT_IN_MS));
+
+    return 0;
+}
+int on_connect_request(struct rdma_cm_id *id)
+{
+    struct rdma_conn_param cm_params;
+
+    printf("received connection request.\n");
+    build_connection(id);
+    build_params(&cm_params);
+    sprintf(get_local_message_region(id->context), "message from passive/server side with pid %d", getpid());
+    TEST_NZ(rdma_accept(id, &cm_params));
+
+    return 0;
+}
+
+int on_connection(struct rdma_cm_id *id)
+{
+    on_connect(id->context);
+    send_mr(id->context); // ?
+
+    return 0;
+}
+int on_disconnect(struct rdma_cm_id *id)
+{
+    printf("peer disconnected.\n");
+
+    destroy_connection(id->context);
+    return 0;
+}
+
+int on_event(struct rdma_cm_event *event)
+{
+    int r = 0;
+
+    if (event->event == RDMA_CM_EVENT_CONNECT_REQUEST)
+        r = on_connect_request(event->id);
+    else if (event->event == RDMA_CM_EVENT_ADDR_RESOLVED)
+        r = on_addr_resolved(event->id);
+    else if (event->event == RDMA_CM_EVENT_ROUTE_RESOLVED)
+        r = on_route_resolved(event->id);
+    else if (event->event == RDMA_CM_EVENT_ESTABLISHED)
+        r = on_connection(event->id);
+    else if (event->event == RDMA_CM_EVENT_DISCONNECTED)
+        r = on_disconnect(event->id);
+    else {
+        fprintf(stderr, "on_event: %d\n", event->event);
+        die("on_event: unknown event.");
+    }
+
+    return r;
+}
+int on_route_resolved(struct rdma_cm_id *id)
+{
+    struct rdma_conn_param cm_params;
+
+    printf("route resolved.\n");
+    build_params(&cm_params);
+    TEST_NZ(rdma_connect(id, &cm_params));
+
+    return 0;
+}
+/*
+void usage(const char *argv0)
+{
+    fprintf(stderr, "usage: %s <mode> <server-address> <server-port>\n  mode = \"read\", \"write\"\n", argv0);
+    exit(1);
+}
+*/
 /*
  * Initializes the connections array. We don't actually allocate connection
  * structures until they're needed, so as to avoid wasting memory when the
@@ -6747,6 +6911,10 @@ int main (int argc, char **argv) {
     }
 
     if (start_marginal_utility_thread() == -1){
+       exit(EXIT_FAILURE);
+    }
+
+    if (start_rdma_connection_handler_thread() == -1){
        exit(EXIT_FAILURE);
     }
 

@@ -25,6 +25,7 @@
 #include "logger.h"
 #include "shadow_assoc.h"
 #include "shm_malloc.h"
+#include "rdma_util.h"
 
 #include "sasl_defs.h"
 

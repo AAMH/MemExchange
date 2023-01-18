@@ -23,7 +23,7 @@ struct tracker {                /* Shared memory structure to keep track of curr
     double preset_share[4];     // Shows how much of shared memory each tenant is occupying
 };
 
-char tracker_name[20], semaph_name[20], slab_name[20];
+extern char tracker_name[20], semaph_name[20], slab_name[20];
 void init_shared_names(int x);
 
 void * shm_malloc(size_t n);    // MAIN ALLOCATION FUNCTION
