@@ -13,7 +13,8 @@
 #include <sys/stat.h>
 #include <semaphore.h>
 
-char tracker_name[20], semaph_name[20], slab_name[20];
+char tracker_name[20], semaph_name[20] = "/semaph0", slab_name[20];
+bool rdma_page_transfer_in_progress = false;
 
 void * shm_malloc(size_t n) {
 //    pthread_mutex_t shm_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -284,13 +285,19 @@ bool set_scores(double sc1, double sc2, int id){
     }
 	
     if(sc2 < track->min_score){
+        if(track->min_id != id){
+            track->min_counter = 0;
+            track->min_id = id;
+        }
         track->min_score = sc2;
-        track->min_id = id;
     }
     
     if(sc1 > track->max_score){
+        if(track->max_id != id){
+            track->max_counter = 0;
+            track->max_id = id;
+        }
         track->max_score = sc1;
-        track->max_id = id;
 
         if(track->min_id == id){
             track->min_id == -1;
@@ -304,12 +311,12 @@ bool set_scores(double sc1, double sc2, int id){
     return b;
 }
 
-bool compare_minID(int id, double sc){
+int compare_minID(int id, double sc){
 
     int tracker_fd;
     sem_t * mutex;
     struct tracker* track;
-    bool b = false;
+    int b = 0;
 
     if ((mutex = sem_open(semaph_name, 0)) == SEM_FAILED) {
         perror("semaphore failed!");
@@ -320,19 +327,20 @@ bool compare_minID(int id, double sc){
     tracker_fd = shm_open(tracker_name,  O_RDWR, S_IRUSR | S_IWUSR);
     if (tracker_fd == -1) {
         printf("tracker file not found!\n");
-        return NULL;
+        return -1;
     }
 
     track = mmap(NULL, sizeof(struct tracker),
         PROT_READ | PROT_WRITE, MAP_SHARED, tracker_fd, 0);
     if (track == MAP_FAILED) {
-        return NULL;
+        return -1;
     }
 	
     if(id == track->min_id){
-        b = true;
+        track->min_counter++;
         track->min_score = sc;
     }
+    b = track->min_counter;
 
     munmap(track, sizeof(struct tracker));
     close(tracker_fd);
@@ -340,12 +348,12 @@ bool compare_minID(int id, double sc){
     return b;
 }
 
-bool compare_maxID(int id, double sc){
+int compare_maxID(int id, double sc){
 
     int tracker_fd;
     sem_t * mutex;
     struct tracker* track;
-    bool b = false;
+    int b = 0;
 
     if ((mutex = sem_open(semaph_name, 0)) == SEM_FAILED) {
         perror("semaphore failed!");
@@ -356,19 +364,20 @@ bool compare_maxID(int id, double sc){
     tracker_fd = shm_open(tracker_name,  O_RDWR, S_IRUSR | S_IWUSR);
     if (tracker_fd == -1) {
         printf("tracker file not found!\n");
-        return NULL;
+        return -1;
     }
 
     track = mmap(NULL, sizeof(struct tracker),
         PROT_READ | PROT_WRITE, MAP_SHARED, tracker_fd, 0);
     if (track == MAP_FAILED) {
-        return NULL;
+        return -1;
     }
 	
     if(id == track->max_id){
-        b = true;
+        track->max_counter++;
         track->max_score = sc;
     }
+    b = track->max_counter;
 
     munmap(track, sizeof(struct tracker));
     close(tracker_fd);
@@ -613,6 +622,349 @@ bool unlock_spare(){
     }
 	
     track->spare_lock = false;
+
+    munmap(track, sizeof(struct tracker));
+    close(tracker_fd);
+    sem_post(mutex);  
+    return b;
+}
+
+bool is_remote_spare_received(){
+
+    int tracker_fd;
+    sem_t * mutex;
+    struct tracker* track;
+    bool b = false;
+
+    if ((mutex = sem_open(semaph_name, 0)) == SEM_FAILED) {
+        perror("semaphore failed!");
+        exit(1);
+    }
+    sem_wait(mutex);
+
+    tracker_fd = shm_open(tracker_name,  O_RDWR, S_IRUSR | S_IWUSR);
+    if (tracker_fd == -1) {
+        printf("tracker file not found!\n");
+        return false;
+    }
+
+    track = mmap(NULL, sizeof(struct tracker),
+        PROT_READ | PROT_WRITE, MAP_SHARED, tracker_fd, 0);
+    if (track == MAP_FAILED) {
+        return false;
+    }
+	
+    b = track->remote_spare_received;
+
+    munmap(track, sizeof(struct tracker));
+    close(tracker_fd);
+    sem_post(mutex);  
+    return b;
+}
+
+void receive_remote_mem(struct connection * conn, size_t n, int id){
+
+    int tracker_fd;
+    sem_t * mutex;
+    struct tracker* track;
+
+    if ((mutex = sem_open(semaph_name, 0)) == SEM_FAILED) {
+        perror("semaphore failed!");
+        exit(1);
+    }
+    sem_wait(mutex);
+
+    tracker_fd = shm_open(tracker_name,  O_RDWR, S_IRUSR | S_IWUSR);
+    if (tracker_fd == -1) {
+        printf("tracker file not found!\n");
+        return;
+    }
+
+    track = mmap(NULL, sizeof(struct tracker),
+        PROT_READ | PROT_WRITE, MAP_SHARED, tracker_fd, 0);
+    if (track == MAP_FAILED) {
+        return;
+    }
+	
+    track->latest_conn = conn;
+    track->remote_spare_received = true;
+
+    track->preset_share[id] += n;
+    track->spare_size = n;
+
+    munmap(track, sizeof(struct tracker));
+    close(tracker_fd);
+    sem_post(mutex);
+}
+
+
+void set_remote_mem(void * addr, size_t n, int id){
+
+    int tracker_fd;
+    sem_t * mutex;
+    struct tracker* track;
+
+    if ((mutex = sem_open(semaph_name, 0)) == SEM_FAILED) {
+        perror("semaphore failed!");
+        exit(1);
+    }
+    sem_wait(mutex);
+
+    tracker_fd = shm_open(tracker_name,  O_RDWR, S_IRUSR | S_IWUSR);
+    if (tracker_fd == -1) {
+        printf("tracker file not found!\n");
+        return;
+    }
+
+    track = mmap(NULL, sizeof(struct tracker),
+        PROT_READ | PROT_WRITE, MAP_SHARED, tracker_fd, 0);
+    if (track == MAP_FAILED) {
+        return;
+    }
+	
+    //track->remote_addr = addr;
+
+    // track->spare_size = n;
+    track->preset_share[id] -= n;
+
+    munmap(track, sizeof(struct tracker));
+    close(tracker_fd);
+    sem_post(mutex);
+}
+
+bool rdma_broadcast(){
+
+    int tracker_fd;
+    sem_t * mutex;
+    struct tracker* track;
+    bool b = false;
+
+    if ((mutex = sem_open(semaph_name, 0)) == SEM_FAILED) {
+        perror("semaphore failed!");
+        exit(1);
+    }
+    sem_wait(mutex);
+
+    tracker_fd = shm_open(tracker_name,  O_RDWR, S_IRUSR | S_IWUSR);
+    if (tracker_fd == -1) {
+        printf("tracker file not found!\n");
+        return NULL;
+    }
+
+    track = mmap(NULL, sizeof(struct tracker),
+        PROT_READ | PROT_WRITE, MAP_SHARED, tracker_fd, 0);
+    if (track == MAP_FAILED) {
+        return NULL;
+    }
+	
+    track->rdma_broadcast = true;
+
+    munmap(track, sizeof(struct tracker));
+    close(tracker_fd);
+    sem_post(mutex);  
+    return b;
+}
+
+
+bool set_rdma_access_port(int rdma_access_port){
+
+    int tracker_fd;
+    sem_t * mutex;
+    struct tracker* track;
+    bool b = false;
+
+    if ((mutex = sem_open(semaph_name, 0)) == SEM_FAILED) {
+        perror("semaphore failed!");
+        exit(1);
+    }
+    sem_wait(mutex);
+
+    tracker_fd = shm_open(tracker_name,  O_RDWR, S_IRUSR | S_IWUSR);
+    if (tracker_fd == -1) {
+        printf("tracker file not found!\n");
+        return NULL;
+    }
+
+    track = mmap(NULL, sizeof(struct tracker),
+        PROT_READ | PROT_WRITE, MAP_SHARED, tracker_fd, 0);
+    if (track == MAP_FAILED) {
+        return NULL;
+    }
+	
+    track->local_access_port_n = rdma_access_port;
+
+    munmap(track, sizeof(struct tracker));
+    close(tracker_fd);
+    sem_post(mutex);  
+    return b;
+}
+
+bool stop_RDMA_broadcast(){
+
+    int tracker_fd;
+    sem_t * mutex;
+    struct tracker* track;
+    bool b = false;
+
+    if ((mutex = sem_open(semaph_name, 0)) == SEM_FAILED) {
+        perror("semaphore failed!");
+        exit(1);
+    }
+    sem_wait(mutex);
+
+    tracker_fd = shm_open(tracker_name,  O_RDWR, S_IRUSR | S_IWUSR);
+    if (tracker_fd == -1) {
+        printf("tracker file not found!\n");
+        return NULL;
+    }
+
+    track = mmap(NULL, sizeof(struct tracker),
+        PROT_READ | PROT_WRITE, MAP_SHARED, tracker_fd, 0);
+    if (track == MAP_FAILED) {
+        return NULL;
+    }
+	
+    track->rdma_broadcast = false;
+
+    munmap(track, sizeof(struct tracker));
+    close(tracker_fd);
+    sem_post(mutex);  
+    return b;
+}
+
+bool set_rdma_server_info(struct sockaddr_in peer_addr, bool boo){
+
+    int tracker_fd;
+    sem_t * mutex;
+    struct tracker* track;
+    bool b = false;
+
+    if ((mutex = sem_open(semaph_name, 0)) == SEM_FAILED) {
+        perror("semaphore failed!");
+        exit(1);
+    }
+    sem_wait(mutex);
+
+    tracker_fd = shm_open(tracker_name,  O_RDWR, S_IRUSR | S_IWUSR);
+    if (tracker_fd == -1) {
+        printf("tracker file not found!\n");
+        return NULL;
+    }
+
+    track = mmap(NULL, sizeof(struct tracker),
+        PROT_READ | PROT_WRITE, MAP_SHARED, tracker_fd, 0);
+    if (track == MAP_FAILED) {
+        return NULL;
+    }
+	 
+    track->rdma_peer_addr = peer_addr;
+    track->remote_spare_requested = boo;
+    track->remote_server_ready = true;
+
+    munmap(track, sizeof(struct tracker));
+    close(tracker_fd);
+    sem_post(mutex);  
+    return b;
+}
+
+bool is_remote_server_available(int id){
+
+    int tracker_fd;
+    sem_t * mutex;
+    struct tracker* track;
+    bool b = false;
+
+    if ((mutex = sem_open(semaph_name, 0)) == SEM_FAILED) {
+        perror("semaphore failed!");
+        exit(1);
+    }
+    sem_wait(mutex);
+
+    tracker_fd = shm_open(tracker_name,  O_RDWR, S_IRUSR | S_IWUSR);
+    if (tracker_fd == -1) {
+        printf("tracker file not found!\n");
+        return false;
+    }
+
+    track = mmap(NULL, sizeof(struct tracker),
+        PROT_READ | PROT_WRITE, MAP_SHARED, tracker_fd, 0);
+    if (track == MAP_FAILED) {
+        return false;
+    }
+
+    if(track->max_id == id)   // Only the candidate tenant should be notified to get a page
+        b = track->remote_server_ready;
+
+    munmap(track, sizeof(struct tracker));
+    close(tracker_fd);
+    sem_post(mutex);  
+    return b;
+}
+bool remote_spare_needed(int id){
+
+    int tracker_fd;
+    sem_t * mutex;
+    struct tracker* track;
+    bool b = false;
+
+    if ((mutex = sem_open(semaph_name, 0)) == SEM_FAILED) {
+        perror("semaphore failed!");
+        exit(1);
+    }
+    sem_wait(mutex);
+
+    tracker_fd = shm_open(tracker_name,  O_RDWR, S_IRUSR | S_IWUSR);
+    if (tracker_fd == -1) {
+        printf("tracker file not found!\n");
+        return false;
+    }
+
+    track = mmap(NULL, sizeof(struct tracker),
+        PROT_READ | PROT_WRITE, MAP_SHARED, tracker_fd, 0);
+    if (track == MAP_FAILED) {
+        return false;
+    }
+
+	if(track->min_id == id)   // Only the candidate tenant should be notified to release a page
+        b = track->remote_spare_requested;
+
+    munmap(track, sizeof(struct tracker));
+    close(tracker_fd);
+    sem_post(mutex);  
+    return b;
+}
+
+bool reset_remote_spare(){
+
+    int tracker_fd;
+    sem_t * mutex;
+    struct tracker* track;
+    bool b = false;
+
+    if ((mutex = sem_open(semaph_name, 0)) == SEM_FAILED) {
+        perror("semaphore failed!");
+        exit(1);
+    }
+    sem_wait(mutex);
+
+    tracker_fd = shm_open(tracker_name,  O_RDWR, S_IRUSR | S_IWUSR);
+    if (tracker_fd == -1) {
+        printf("tracker file not found!\n");
+        return false;
+    }
+
+    track = mmap(NULL, sizeof(struct tracker),
+        PROT_READ | PROT_WRITE, MAP_SHARED, tracker_fd, 0);
+    if (track == MAP_FAILED) {
+        return false;
+    }
+	
+    rdma_page_transfer_in_progress = false;
+    track->remote_spare_requested = false;
+    track->remote_spare_received = false;
+    track->remote_server_ready = false;
+    memset(&(track->rdma_peer_addr), 0, sizeof(struct sockaddr_in));
+    track->local_access_port_n = 0;
 
     munmap(track, sizeof(struct tracker));
     close(tracker_fd);

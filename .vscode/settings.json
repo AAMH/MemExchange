@@ -6,6 +6,20 @@
         "time.h": "c",
         "rdma_util.h": "c",
         "rdma_cma.h": "c",
-        "shm_malloc.h": "c"
+        "shm_malloc.h": "c",
+        "compare": "c",
+        "limits": "c",
+        "new": "c",
+        "netdb.h": "c",
+        "stdlib.h": "c",
+        "stdbool.h": "c",
+        "unistd.h": "c",
+        "types.h": "c",
+        "stat.h": "c",
+        "event.h": "c",
+        "pthread.h": "c",
+        "shadow_assoc.h": "c",
+        "in.h": "c",
+        "mman.h": "c"
     }
 }

@@ -84,17 +84,20 @@ static int start_file_write_thread();
 static int start_marginal_utility_thread();
 
 
-/* RDMA stuff*/
-const int TIMEOUT_IN_MS = 500; /* ms */
-
-static int on_connect_request(struct rdma_cm_id *id);
-static int on_addr_resolved(struct rdma_cm_id *id);
-static int on_connection(struct rdma_cm_id *id);
-static int on_disconnect(struct rdma_cm_id *id);
-static int on_event(struct rdma_cm_event *event);
-static int on_route_resolved(struct rdma_cm_id *id);
-//static void usage(const char *argv0);
-static int start_rdma_connection_handler_thread();
+// /* RDMA stuff*/
+// const int TIMEOUT_IN_MS = 500; /* ms */
+// static bool AM_LENDER = false;
+// static bool should_send_mr = false;
+// static bool sending_op = false;
+// static int on_connect_request(struct rdma_cm_id *id);
+// static int on_addr_resolved(struct rdma_cm_id *id);
+// static int on_connection(struct rdma_cm_id *id);
+// static int on_disconnect(struct rdma_cm_id *id);
+// static int on_event(struct rdma_cm_event *event);
+// static int on_route_resolved(struct rdma_cm_id *id);
+// //static void usage(const char *argv0);
+// // static int start_rdma_server_handler_thread();
+// // static int start_rdma_client_handler_thread();
 
 /* stats */
 static void stats_init(void);
@@ -520,156 +523,213 @@ static int start_marginal_utility_thread() {
     return 0;
 }
 
-/* RDMA connection event handler thread */
+// /* RDMA connection event handler threads */
 
-static pthread_t rdma_connection_handler_tid;
+// static pthread_t rdma_server_handler_tid;
 
-static void *rdma_connection_handler_thread(){
+// static void *rdma_server_handler_thread(){
 
-    bool transfer_mode = false; // Write or Read
-    bool server_mode = true; // Server or Client
-    struct sockaddr_in6 client_addr;
-    struct addrinfo *server_addr;
-    struct rdma_cm_event *event = NULL;
-    struct rdma_cm_id *conn = NULL;
-    struct rdma_event_channel *ec = NULL;
-    uint16_t port = 0;
+//     bool transfer_mode = true; // Write or Read
+//     struct sockaddr_in6 client_addr;
+//     struct rdma_cm_event *event = NULL;
+//     struct rdma_cm_id *conn = NULL;
+//     struct rdma_event_channel *ec = NULL;
+//     uint16_t port = 0;
+
+//     while(1){
+//         if(1){//should_broadcast){
+//             if (transfer_mode)
+//                 set_mode(M_WRITE);
+//             else
+//                 set_mode(M_READ);
+
+//             /* Server-side preparation - All tenants are servers by default*/
+
+//             printf("\nListening for connections ");
+//             TEST_Z(ec = rdma_create_event_channel());
+//             TEST_NZ(rdma_create_id(ec, &conn, NULL, RDMA_PS_TCP));
+
+//             memset(&client_addr, 0, sizeof(client_addr));
+//             client_addr.sin6_family = AF_INET6;
+//             TEST_NZ(rdma_bind_addr(conn, (struct sockaddr *)&client_addr)); // Bind to an empty address for the potential client
+//             TEST_NZ(rdma_listen(conn, 10)); 
+
+//             port = ntohs(rdma_get_src_port(conn));
+//             printf("on port: %d\n", port);
+//             set_rdma_access_port(port);
+
+//             while (rdma_get_cm_event(ec, &event) == 0){
+//                 struct rdma_cm_event event_copy;
+
+//                 memcpy(&event_copy, event, sizeof(*event));
+//                 rdma_ack_cm_event(event);
+
+//                 if (on_event(&event_copy))
+//                     break;
+//             }
+
+//             //rdma_destroy_id(conn);
+//             rdma_destroy_event_channel(ec);
+//         }
+//     }
+// }
+
+// static int start_rdma_server_handler_thread(){
+//     int ret;
+
+//     if ((ret = pthread_create(&rdma_server_handler_tid, NULL,
+//         rdma_server_handler_thread, NULL)) != 0) {
+//         fprintf(stderr, "Can't create rdma_server_handler thread: %s\n",
+//             strerror(ret));
+//         return -1;
+//     }
+
+//     return 0;
+// }
+
+// static pthread_t rdma_client_handler_tid;
+
+// static void *rdma_client_handler_thread(){
+
+//     bool transfer_mode = false; // Write or Read
+//     struct addrinfo *remote_addr;
+//     struct rdma_cm_event *event = NULL;
+//     struct rdma_cm_id *conn = NULL;
+//     struct rdma_event_channel *ec = NULL;
+
+//     char *ip, *port;
+
+//     while(1){
+//         if(should_send_mr || sending_op){ /* A remote tenant is in need of memory*/
+
+//             if(should_send_mr){
+//                 struct tracker trck = get_tracker();
+//                 ip = trck.remote_server_ip;
+//                 port = trck.remote_server_port;
+//             }
+//             else if(sending_op){
+
+//             }
+//             /* Client-side preparation - A server that wants to access another server i.e., a client*/
+
+//             if (transfer_mode)
+//                 set_mode(M_WRITE);
+//             else
+//                 set_mode(M_READ);
+
+//             TEST_Z(ec = rdma_create_event_channel());
+//             TEST_NZ(rdma_create_id(ec, &conn, NULL, RDMA_PS_TCP));
+
+//             struct tracker trck = get_tracker();
+//             printf("\n--Initiating access to a remote server. ");
+//             TEST_NZ(getaddrinfo(ip, port, NULL, &remote_addr));
+//             TEST_NZ(rdma_resolve_addr(conn, NULL, remote_addr->ai_addr, TIMEOUT_IN_MS));
+//             freeaddrinfo(remote_addr);
+//             printf("Remote address resolved.\n");
+        
+
+//             while (rdma_get_cm_event(ec, &event) == 0){
+//                 struct rdma_cm_event event_copy;
+
+//                 memcpy(&event_copy, event, sizeof(*event));
+//                 rdma_ack_cm_event(event);
+
+//                 if (on_event(&event_copy))
+//                     break;
+//             }
+//             should_send_mr = false;
+//             //rdma_destroy_id(conn);
+//             rdma_destroy_event_channel(ec);
+//         }
+//         sleep(2);
+//     }
+// }
+
+// void initiate_RDMA_MR(){
+//     should_send_mr = true;
+// }
+
+// static int start_rdma_client_handler_thread(){
+//     int ret;
+
+//     if ((ret = pthread_create(&rdma_client_handler_tid, NULL,
+//         rdma_client_handler_thread, NULL)) != 0) {
+//         fprintf(stderr, "Can't create rdma_client_handler thread: %s\n",
+//             strerror(ret));
+//         return -1;
+//     }
+
+//     return 0;
+// }
 
 
-    if (transfer_mode)
-        set_mode(M_WRITE);
-    else
-        set_mode(M_READ);
+// int on_addr_resolved(struct rdma_cm_id *id){
+//     printf("address resolved.\n");
+//     AM_LENDER = true;
+//     build_connection(id);
+//     sprintf(get_local_message_region(id->context), "message from active/client side with pid %d", getpid());
+//     TEST_NZ(rdma_resolve_route(id, TIMEOUT_IN_MS));
 
-    memset(&client_addr, 0, sizeof(client_addr));
-    client_addr.sin6_family = AF_INET6;
+//     return 0;
+// }
 
-    //TEST_NZ(getaddrinfo(argv[2], argv[3], NULL, &server_addr));
-    TEST_NZ(getaddrinfo("localhost", "11212", NULL, &server_addr));
+// int on_connect_request(struct rdma_cm_id *id){
+//     struct rdma_conn_param cm_params;
 
-    TEST_Z(ec = rdma_create_event_channel());
-    TEST_NZ(rdma_create_id(ec, &conn, NULL, RDMA_PS_TCP));
- 
-    if (server_mode) {
-        TEST_NZ(rdma_bind_addr(conn, (struct sockaddr *)&client_addr));
-        TEST_NZ(rdma_listen(conn, 10)); /* backlog=10 is arbitrary */
+//     printf("received connection request.\n");
+//     build_connection(id);
+//     build_params(&cm_params);
+//     sprintf(get_local_message_region(id->context), "message from passive/server side with pid %d", getpid());
+//     TEST_NZ(rdma_accept(id, &cm_params));
 
-        port = ntohs(rdma_get_src_port(conn));
-        printf("listening on port %d.\n", port);
-    }
+//     return 0;
+// }
 
-    else {
-        TEST_NZ(rdma_resolve_addr(conn, NULL, server_addr->ai_addr, TIMEOUT_IN_MS));
-        freeaddrinfo(server_addr);
-    }
+// int on_connection(struct rdma_cm_id *id){
+//     on_connect(id->context);
+//     if(AM_LENDER)
+//         send_mr(id->context); // ?
 
-    printf("listening on port %d.\n", port);
+//     return 0;
+// }
 
-    while(1){
-        while (rdma_get_cm_event(ec, &event) == 0) {
-            struct rdma_cm_event event_copy;
+// int on_disconnect(struct rdma_cm_id *id){
+//     printf("peer disconnected.\n");
+//     destroy_connection(id->context);
+//     return 1;
+// }
 
-            memcpy(&event_copy, event, sizeof(*event));
-            rdma_ack_cm_event(event);
+// int on_event(struct rdma_cm_event *event){
+//     int r = 0;
 
-            if (on_event(&event_copy))
-            break;
-        }
-        }
+//     if (event->event == RDMA_CM_EVENT_CONNECT_REQUEST)
+//         r = on_connect_request(event->id);
+//     else if (event->event == RDMA_CM_EVENT_ADDR_RESOLVED)
+//         r = on_addr_resolved(event->id);
+//     else if (event->event == RDMA_CM_EVENT_ROUTE_RESOLVED)
+//         r = on_route_resolved(event->id);
+//     else if (event->event == RDMA_CM_EVENT_ESTABLISHED)
+//         r = on_connection(event->id);
+//     else if (event->event == RDMA_CM_EVENT_DISCONNECTED)
+//         r = on_disconnect(event->id);
+//     else {
+//         fprintf(stderr, "on_event: %d\n", event->event);
+//         die("on_event: unknown event.");
+//     }
 
-    rdma_destroy_id(conn);
-    rdma_destroy_event_channel(ec);
-}
+//     return r;
+// }
 
-static int start_rdma_connection_handler_thread(){
-    int ret;
+// int on_route_resolved(struct rdma_cm_id *id){
+//     struct rdma_conn_param cm_params;
 
-    if ((ret = pthread_create(&rdma_connection_handler_tid, NULL,
-        rdma_connection_handler_thread, NULL)) != 0) {
-        fprintf(stderr, "Can't create rdma_connection_handler thread: %s\n",
-            strerror(ret));
-        return -1;
-    }
+//     printf("route resolved.\n");
+//     build_params(&cm_params);
+//     TEST_NZ(rdma_connect(id, &cm_params));
 
-    return 0;
-}
+//     return 0;
+// }
 
-int on_addr_resolved(struct rdma_cm_id *id)
-{
-    printf("address resolved.\n");
-
-    build_connection(id);
-    sprintf(get_local_message_region(id->context), "message from active/client side with pid %d", getpid());
-    TEST_NZ(rdma_resolve_route(id, TIMEOUT_IN_MS));
-
-    return 0;
-}
-int on_connect_request(struct rdma_cm_id *id)
-{
-    struct rdma_conn_param cm_params;
-
-    printf("received connection request.\n");
-    build_connection(id);
-    build_params(&cm_params);
-    sprintf(get_local_message_region(id->context), "message from passive/server side with pid %d", getpid());
-    TEST_NZ(rdma_accept(id, &cm_params));
-
-    return 0;
-}
-
-int on_connection(struct rdma_cm_id *id)
-{
-    on_connect(id->context);
-    send_mr(id->context); // ?
-
-    return 0;
-}
-int on_disconnect(struct rdma_cm_id *id)
-{
-    printf("peer disconnected.\n");
-
-    destroy_connection(id->context);
-    return 0;
-}
-
-int on_event(struct rdma_cm_event *event)
-{
-    int r = 0;
-
-    if (event->event == RDMA_CM_EVENT_CONNECT_REQUEST)
-        r = on_connect_request(event->id);
-    else if (event->event == RDMA_CM_EVENT_ADDR_RESOLVED)
-        r = on_addr_resolved(event->id);
-    else if (event->event == RDMA_CM_EVENT_ROUTE_RESOLVED)
-        r = on_route_resolved(event->id);
-    else if (event->event == RDMA_CM_EVENT_ESTABLISHED)
-        r = on_connection(event->id);
-    else if (event->event == RDMA_CM_EVENT_DISCONNECTED)
-        r = on_disconnect(event->id);
-    else {
-        fprintf(stderr, "on_event: %d\n", event->event);
-        die("on_event: unknown event.");
-    }
-
-    return r;
-}
-int on_route_resolved(struct rdma_cm_id *id)
-{
-    struct rdma_conn_param cm_params;
-
-    printf("route resolved.\n");
-    build_params(&cm_params);
-    TEST_NZ(rdma_connect(id, &cm_params));
-
-    return 0;
-}
-/*
-void usage(const char *argv0)
-{
-    fprintf(stderr, "usage: %s <mode> <server-address> <server-port>\n  mode = \"read\", \"write\"\n", argv0);
-    exit(1);
-}
-*/
 /*
  * Initializes the connections array. We don't actually allocate connection
  * structures until they're needed, so as to avoid wasting memory when the
@@ -1774,6 +1834,17 @@ static void process_bin_get_or_touch(conn *c) {
         it = item_get(key, nkey, c, DO_UPDATE);
     }
 
+    if(!it) {   // It missed the local queue, check the remote items before reporting a miss
+
+        remote_item* remote_it = slabs_rdma_lookup(key, nkey);
+        if(remote_it){
+            printf("item found remote !\n");
+            it = get_remote_item(remote_it);     // Maybe we can skip retriving the actual item to reduce overhead. Report a hit and move on!
+            
+        }
+    }
+
+
     if (it) {
         /* the length has two unnecessary bytes ("\r\n") */
         uint16_t keylen = 0;
@@ -1833,6 +1904,9 @@ static void process_bin_get_or_touch(conn *c) {
         c->write_and_go = conn_new_cmd;
         /* Remember this command so we can garbage collect it later */
         c->item = it;
+        if(it->r_it)
+            set_remote_item(it);    // send the item over to the remote host to conserve the changes made during the GET command
+
     } else {
         pthread_mutex_lock(&c->thread->stats.mutex);
         if (should_touch) {
@@ -3574,6 +3648,16 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
             }
 
             it = item_get(key, nkey, c, DO_UPDATE);
+
+            if(!it) {   // It missed the local queue, check the remote items before reporting a miss
+
+                remote_item* remote_it = slabs_rdma_lookup(key, nkey);
+                if(remote_it){
+                    printf("item is remote !\n");
+                    it = get_remote_item(remote_it);     // Maybe we can skip retriving the actual item to reduce overhead. Report a hit and move on!
+                }
+            }
+
             if (settings.detail_enabled) {
                 stats_prefix_record_get(key, nkey, NULL != it);
             }
@@ -3691,6 +3775,8 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
                 incr_slab_hits(ITEM_clsid(it),it->page_id);
                 *(c->ilist + i) = it;
                 i++;
+                if(it->r_it)
+                    set_remote_item(it);    // send the item over to the remote host to conserve the changes made during the GET command
 
             } else {
                 pthread_mutex_lock(&c->thread->stats.mutex);
@@ -6868,6 +6954,7 @@ int main (int argc, char **argv) {
     stats_init();
     assoc_init(settings.hashpower_init);
     shadow_assoc_init(settings.hashpower_init);
+    rdma_assoc_init(settings.hashpower_init);
     conn_init();
     slabs_init(settings.maxbytes, settings.factor, preallocate,
             use_slab_sizes ? slab_sizes : NULL, settings.isGreedy);
@@ -6911,10 +6998,6 @@ int main (int argc, char **argv) {
     }
 
     if (start_marginal_utility_thread() == -1){
-       exit(EXIT_FAILURE);
-    }
-
-    if (start_rdma_connection_handler_thread() == -1){
        exit(EXIT_FAILURE);
     }
 

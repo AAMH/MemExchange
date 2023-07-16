@@ -28,6 +28,7 @@
 static slabclass_t slabclass[MAX_NUMBER_OF_SLAB_CLASSES];
 static size_t mem_limit = 0;
 static size_t mem_malloced = 0;
+static size_t mem_malloced_remote = 0;
 /* If the memory limit has been hit once. Used as a hint to decide when to
  * early-wake the LRU maintenance thread */
 static bool mem_limit_reached = false;
@@ -44,25 +45,44 @@ static int prev_victim = POWER_SMALLEST;
 static pthread_mutex_t slabs_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t slabs_rebalance_lock = PTHREAD_MUTEX_INITIALIZER;
 
+static enum realloc_dest_type {
+    TENANT_SLAB,
+    TENANT_LOCAL,
+    TENANT_REMOTE
+} realloc_destination = TENANT_SLAB, realloc_source = TENANT_SLAB;
 
 static uint64_t total_misses = 0;
 static bool greedy = false;
 static bool aborted = false;
-static bool rebal_source_ext = false;       // indicating if reassigning is being used to take memory from an external source
-static bool rebal_dest_ext = false;         // indicating if reassigning is being used to give memory to an external destination
+// static bool rebal_source_ext = false;       // indicating if reassigning is being used to take memory from an external source
+// static bool rebal_dest_ext = false;         // indicating if reassigning is being used to give memory to an external destination
 static bool is_taken_careof = false;
 static int slab_shadowq_dec_victim = POWER_SMALLEST;
-static int wasmax_count = 0;
-static int wasmin_count = 0;
 static int pages_to_request = -1;
 static int slab_to_release = -1;
 static double avghitrate = 0;
 static double maxhitrate = 0;
+static double latest_score1 = 0;
+static double latest_score2 = 0;
 static clock_t start_t = 0;
 static clock_t end_t = 0;
 
 static int total_released_pages = 0;
 static int total_received_pages = 0;
+
+/* RDMA stuff*/
+struct rdma_cm_id *rdma_connections_head = NULL;
+const int MAX_CONNECTIONS_ALLOWED = 10;  // Maximum number of concurent RDMA connections
+const int TIMEOUT_IN_MS = 500;
+void * remote_region = NULL;
+
+static int on_connect_request(struct rdma_cm_id *id);
+static int on_addr_resolved(struct rdma_cm_id *id);
+static int on_connection(struct rdma_cm_id *id);
+static int on_disconnect(struct rdma_cm_id *id);
+static int on_event(struct rdma_cm_event *event);
+static int on_route_resolved(struct rdma_cm_id *id);
+
 
 void waitForSpare();
 /*
@@ -71,6 +91,7 @@ void waitForSpare();
 static int do_slabs_newslab(const unsigned int id);
 static void *memory_allocate(size_t size);
 static void do_slabs_free(void *ptr, const size_t size, unsigned int id);
+static void do_slabs_free_remote(char *lptr, const size_t size, unsigned int id);
 
 /* Preallocate as many slab pages as possible (called from slabs_init)
    on start-up, so users don't get confused out-of-memory errors when
@@ -121,7 +142,7 @@ void slabs_init(const size_t limit, const double factor, const bool prealloc, co
             mem_current = mem_base;
             if(greedy)
                 //mem_avail = trck.max_size - trck.used_size;
-                mem_avail = mem_limit - mem_malloced;
+                mem_avail = mem_limit - (mem_malloced + mem_malloced_remote);
             else
                 mem_avail = mem_limit;
         } else {
@@ -178,6 +199,7 @@ void slabs_init(const size_t limit, const double factor, const bool prealloc, co
     if (prealloc) {
         slabs_preallocate(power_largest);
     }
+
 }
 
 static void slabs_preallocate (const unsigned int maxslabs) {
@@ -211,6 +233,9 @@ static int grow_slab_list (const unsigned int id) {
         if (new_list == 0) return 0;
         p->list_size = new_size;
         p->slab_list = new_list;
+
+        p->rkey = realloc(p->rkey, new_size * sizeof(uint32_t));
+        p->conn = realloc(p->conn, new_size * sizeof(struct connection *));
     }
     return 1;
 }
@@ -223,6 +248,29 @@ static void split_slab_page_into_freelist(char *ptr, const unsigned int id, size
         do_slabs_free(ptr, 0, id);
         ((item *)ptr)->page_id = p->slabs-1;
         ptr += p->size;
+    }
+}
+
+static void split_remote_page_into_freelist(char *rptr, char *lptr, const unsigned int id, size_t sizee) {
+    slabclass_t *p = &slabclass[id];
+    int x;
+    int i = sizee / p->size;
+    for (x = 0; x < i; x++) {
+        do_slabs_free_remote(lptr, 0, id);
+        lptr += p->size;
+
+        remote_item *r_item = malloc(sizeof(struct _remitem));
+        r_item->address = rptr;
+        // uint32_t hv = hash(&r_item->address, sizeof(void*));
+        // rdma_assoc_insert(r_item, hv);
+
+        r_item->next = p->rslots;
+        if (r_item->next) r_item->next->prev = r_item;
+        p->rslots = r_item;
+        r_item->page_id = p->slabs-1;
+        r_item->slabs_clsid = id;
+
+        rptr += p->size;
     }
 }
 
@@ -250,7 +298,7 @@ static int do_slabs_newslab(const unsigned int id) {
         // mem_avail = trck.max_size - trck.used_size;
         // mem_limit = mem_malloced + mem_avail ;
         mem_limit = trck.preset_share[(settings.port - 11212) % 4];
-        mem_avail = mem_limit - mem_malloced;
+        mem_avail = mem_limit - (mem_malloced + mem_malloced_remote);
         printf("free mem(this): %lu\n", mem_avail);  
     }
 
@@ -276,6 +324,8 @@ static int do_slabs_newslab(const unsigned int id) {
     split_slab_page_into_freelist(ptr, id, len);
 
     p->slab_list[p->slabs++] = ptr;
+    p->rkey[p->slabs-1] = NULL;
+    p->conn[p->slabs-1] = NULL;
     MEMCACHED_SLABS_SLABCLASS_ALLOCATE(id);
 
     return 1;
@@ -305,17 +355,35 @@ static void *do_slabs_alloc(const size_t size, unsigned int id, uint64_t *total_
         do_slabs_newslab(id);
     }
 
-    if (p->sl_curr != 0) {
+    if (p->sl_curr != 0) {      /* We have free slots, either local or remote*/
         /* return off our freelist */
         it = (item *)p->slots;
-        p->slots = it->next;
-        if (it->next) it->next->prev = 0;
+        if(it) {
+            p->slots = it->next;
+            if (it->next) it->next->prev = 0;
+            it->r_it = NULL;
+        }
+        else {          /* No available local slot, check the remote slots*/
+            remote_item * r_it = (remote_item *) p->rslots; // should NOT be empty, since sl_curr was not zero.
+            p->rslots = r_it->next;
+            if (r_it->next) r_it->next->prev = 0;
+
+            // printf("pageid: %d\n", r_it->page_id);
+            // printf("conn: %p\n", p->conn[r_it->page_id]);
+            // printf("local region:%p\n", p->conn[r_it->page_id]->rdma_local_region);
+
+            it = p->conn[r_it->page_id]->rdma_local_region;  //malloc(sizeof(struct _stritem));
+            memset(it, 0, sizeof(struct _stritem));
+            it->r_it = r_it;
+            it->slabs_clsid = id;
+            //printf("Using a remote item. class: %d \n", it->slabs_clsid);
+        }
         /* Kill flag and initialize refcount here for lock safety in slab
-         * mover's freeness detection. */
-        it->it_flags &= ~ITEM_SLABBED;
-        it->refcount = 1;
-        p->sl_curr--;
-        ret = (void *)it;
+            * mover's freeness detection. */
+            it->it_flags &= ~ITEM_SLABBED;
+            it->refcount = 1;
+            p->sl_curr--;
+            ret = (void *)it;
     } else {
         ret = NULL;
     }
@@ -406,6 +474,78 @@ static void do_slabs_free(void *ptr, const size_t size, unsigned int id) {
         p->requested -= size;
     } else {
         do_slabs_free_chunked(it, size);
+    }
+    return;
+}
+
+static void do_slabs_free_chunked_remote(item *it, const size_t size) {
+    item_chunk *chunk = (item_chunk *) ITEM_data(it);
+    slabclass_t *p;
+
+    it->it_flags = ITEM_SLABBED;
+    it->slabs_clsid = 0;
+    it->prev = 0;
+    // header object's original classid is stored in chunk.
+    p = &slabclass[chunk->orig_clsid];
+    if (chunk->next) {
+        chunk = chunk->next;
+        chunk->prev = 0;
+    } else {
+        // header with no attached chunk
+        chunk = NULL;
+    }
+
+    // return the header object.
+    // TODO: This is in three places, here and in do_slabs_free().
+    it->prev = 0;
+    it->next = p->slots;
+    if (it->next) it->next->prev = it;
+    p->slots = it;
+    p->sl_curr++;
+    // TODO: macro
+    p->requested -= it->nkey + 1 + it->nsuffix + sizeof(item) + sizeof(item_chunk);
+    if (settings.use_cas) {
+        p->requested -= sizeof(uint64_t);
+    }
+
+    item_chunk *next_chunk;
+    while (chunk) {
+        assert(chunk->it_flags == ITEM_CHUNK);
+        chunk->it_flags = ITEM_SLABBED;
+        p = &slabclass[chunk->slabs_clsid];
+        chunk->slabs_clsid = 0;
+        next_chunk = chunk->next;
+
+        chunk->prev = 0;
+        chunk->next = p->slots;
+        if (chunk->next) chunk->next->prev = chunk;
+        p->slots = chunk;
+        p->sl_curr++;
+        p->requested -= chunk->size + sizeof(item_chunk);
+
+        chunk = next_chunk;
+    }
+
+    return;
+}
+
+static void do_slabs_free_remote(char *lptr, const size_t size, unsigned int id) {
+    slabclass_t *p;
+    item *it;
+
+    p = &slabclass[id];
+
+    it = (item *)lptr;
+    if ((it->it_flags & ITEM_CHUNKED) == 0) {
+        it->it_flags = ITEM_SLABBED;
+        it->slabs_clsid = id;
+        it->prev = 0;
+        it->page_id = p->slabs-1; 
+
+        p->sl_curr++;
+        p->requested -= size;
+    } else {
+        //do_slabs_free_chunked_remote(it, size);
     }
     return;
 }
@@ -555,7 +695,7 @@ static void *memory_allocate(size_t size) {
         // mem_avail = trck.max_size - trck.used_size;
         // mem_limit = mem_malloced + mem_avail ;
         mem_limit = trck.preset_share[(settings.port - 11212) % 4];
-        mem_avail = mem_limit - mem_malloced;
+        mem_avail = mem_limit - (mem_malloced + mem_malloced_remote);
     }
     return ret;
 }
@@ -680,7 +820,7 @@ static int slab_rebalance_start(void) {
     pthread_mutex_lock(&slabs_lock);
 
     /* source is not external AND it's not just releasing for someone else*/
-    if(!rebal_source_ext && !rebal_dest_ext){
+    if(!realloc_source && !realloc_destination){
         if (slab_rebal.s_clsid < POWER_SMALLEST ||
             slab_rebal.s_clsid > power_largest  ||
             slab_rebal.d_clsid < SLAB_GLOBAL_PAGE_POOL ||
@@ -697,13 +837,13 @@ static int slab_rebalance_start(void) {
             no_go = -1;
         }
     }
-    if(rebal_source_ext)
+    if(realloc_source)
         if(!grow_slab_list(slab_rebal.d_clsid)) {
             no_go = -1;
         }
     s_cls = &slabclass[slab_rebal.s_clsid];
 
-    if(rebal_source_ext && s_cls->slabs == 0)
+    if(realloc_source && s_cls->slabs == 0)
         s_cls = &slabclass[slab_rebal.d_clsid];
 
     if (no_go != 0) {
@@ -714,7 +854,7 @@ static int slab_rebalance_start(void) {
     /* Always kill the first available slab page as it is most likely to
         * contain the oldest items
         */
-    if(rebal_dest_ext)
+    if(realloc_destination)
         slab_rebal.slab_start = s_cls->slab_list[slab_to_release];
     else
         slab_rebal.slab_start = s_cls->slab_list[0];
@@ -727,7 +867,7 @@ static int slab_rebalance_start(void) {
     /* Also tells do_item_get to search for items in this slab */
     slab_rebalance_signal = 2;
         
-    if(rebal_dest_ext && !is_taken_careof){
+    if(realloc_destination && !is_taken_careof){
         printf("releasing address range: %p to %p \n",slab_rebal.slab_start,slab_rebal.slab_end);
         is_taken_careof = true;
     }
@@ -822,7 +962,7 @@ static int slab_rebalance_move(void) {
 
     pthread_mutex_lock(&slabs_lock);
 
-    if(!rebal_source_ext){
+    if(!realloc_source){
     s_cls = &slabclass[slab_rebal.s_clsid];
 
     for (x = 0; x < slab_bulk_check; x++) {
@@ -1073,12 +1213,14 @@ static void slab_rebalance_finish(void) {
      */
 
     void * pp = NULL;
-    if(!rebal_source_ext){      // No need to do this when we are in receiver side of reassigning
+    if(!realloc_source){      // No need to do this when we are in receiver side of reassigning
         s_cls->slabs--;
         pp = s_cls->slab_list[slab_to_release];
         for (x = slab_to_release; x < s_cls->slabs; x++) {
             s_cls->slab_list[x] = s_cls->slab_list[x + 1];
             s_cls->hits[x] = s_cls->hits[x + 1];
+            s_cls->rkey[x] = s_cls->rkey[x + 1];
+            s_cls->conn[x] = s_cls->conn[x + 1];
 
             char * ptr = s_cls->slab_list[x];
             for (int y = 0; y < s_cls->perslab; y++){
@@ -1089,17 +1231,31 @@ static void slab_rebalance_finish(void) {
         }
         s_cls->slab_list[s_cls->slabs] = NULL;
         s_cls->hits[s_cls->slabs] = 0;
+        s_cls->rkey[s_cls->slabs] = NULL;
+        s_cls->conn[s_cls->slabs] = NULL;
 
-        if(rebal_dest_ext){
+        if(realloc_destination){
             size_t size = adjust_size((size_t)(s_cls->size * s_cls->perslab));
-            set_spare_mem(pp,size,slab_rebal.s_clsid,(settings.port - 11212) % 4);
+
+            if(realloc_destination != TENANT_REMOTE){
+                set_spare_mem(pp,size,slab_rebal.s_clsid,(settings.port - 11212) % 4);
+                munmap(pp,size);
+            }
+
             printf("    address: %p \n",pp);
-            munmap(pp,size);
+
+            if(realloc_destination == TENANT_REMOTE){
+                set_remote_mem(pp, size,(settings.port - 11212) % 4);
+                struct tracker trck = get_tracker();
+                remote_region = pp;
+                start_rdma_client();
+                reset_remote_spare();
+            }
         }
     }
     /* taking care of destination */
-    if(!rebal_dest_ext){
-        if(rebal_source_ext){
+    if(!realloc_destination){
+        if(realloc_source == TENANT_LOCAL){
             size_t si = (size_t)(d_cls->size * d_cls->perslab);
             item * ppp = (item *)shm_mallocAt(si,(settings.port - 11212) % 4);
             si = adjust_size(si);
@@ -1117,6 +1273,28 @@ static void slab_rebalance_finish(void) {
             split_slab_page_into_freelist(d_cls->slab_list[d_cls->slabs-1], slab_rebal.d_clsid,si);
             printf("%d items added\n",d_cls->sl_curr - temp);
         }
+        else if(realloc_source == TENANT_REMOTE){
+            size_t si = (size_t)(d_cls->size * d_cls->perslab);
+            si = adjust_size(si);
+          
+            struct tracker trck = get_tracker();            
+            if(trck.spare_size < si){
+                printf(" Adjusting..\n");
+                si = trck.spare_size;
+             } 
+
+            struct connection *conn = trck.latest_conn;
+            memset(conn->rdma_local_region, 0, si);   
+
+            d_cls->slab_list[d_cls->slabs++] = conn->peer_mr.addr;
+            d_cls->rkey[d_cls->slabs-1] = conn->peer_mr.rkey;
+            d_cls->conn[d_cls->slabs-1] = conn;
+            printf("  Memory address: %p,  rkey: %d, ip: %p\n",conn->peer_mr.addr, conn->peer_mr.rkey, rdma_get_peer_addr(conn->id)); 
+            int temp = d_cls->sl_curr;
+            split_remote_page_into_freelist(d_cls->slab_list[d_cls->slabs-1], conn->rdma_local_region, slab_rebal.d_clsid, si);
+            printf("%d items added\n",d_cls->sl_curr - temp);
+
+        }
         else{   
             d_cls->slab_list[d_cls->slabs++] = slab_rebal.slab_start;
             /* Don't need to split the page into chunks if we're just storing it */
@@ -1131,23 +1309,28 @@ static void slab_rebalance_finish(void) {
     }
     
     /* adjust memory limit since a slab was reassigned to/from external source/destination */
-    if(rebal_source_ext || rebal_dest_ext){
+    if(realloc_source || realloc_destination){
         size_t si = adjust_size((size_t)(s_cls->size * s_cls->perslab));
         struct tracker trck = get_tracker();
             
-        if(rebal_source_ext){
+        if(realloc_source == TENANT_LOCAL){
             if(trck.spare_size < si)
                 si = trck.spare_size;
             mem_malloced += si; 
         }
-        else
+        else if(realloc_source == TENANT_REMOTE){
+            if(trck.spare_size < si)
+                si = trck.spare_size;
+            mem_malloced_remote += 1024 * 1024 /*si*/; 
+        }
+        else 
            mem_malloced -= si;   
         //mem_avail = trck.max_size - trck.used_size;
         //mem_limit = mem_malloced + mem_avail ;
         mem_limit = trck.preset_share[(settings.port - 11212) % 4];
-        mem_avail = mem_limit - mem_malloced;
+        mem_avail = mem_limit - (mem_malloced + mem_malloced_remote);
         unlock_spare();
-        printf("total allocated mem(this) : %ld\n",mem_malloced);
+        printf("total allocated mem(this-local): %lu   (this-remote): %lu\n\n", mem_malloced, mem_malloced_remote);
     }
 
     slab_rebal.done       = 0;
@@ -1164,7 +1347,7 @@ static void slab_rebalance_finish(void) {
     slab_rebal.rescues  = 0;
 
 
-    if(rebal_source_ext){
+    if(realloc_source){
         reset_locks();
         slab_rebalance_signal = 10;
     }
@@ -1173,8 +1356,8 @@ static void slab_rebalance_finish(void) {
         slab_rebalance_signal = 0;
         slab_rebal.d_clsid    = 0;
     }
-    rebal_source_ext = false;
-    rebal_dest_ext = false;
+    realloc_source = TENANT_SLAB;
+    realloc_destination = TENANT_SLAB;
 
     pthread_mutex_unlock(&slabs_lock);
 
@@ -1261,7 +1444,7 @@ static enum reassign_result_type do_slabs_reassign(int src, int dst) {
     }
 
     if (src == dst)
-        if(!rebal_source_ext)   // two slabs being in the same class is not a problem when they are from different tenants 
+        if(!realloc_source)   // two slabs being in the same class is not a problem when they are from different tenants 
             return REASSIGN_SRC_DST_SAME;
 
     /* Special indicator to choose ourselves. */
@@ -1271,11 +1454,11 @@ static enum reassign_result_type do_slabs_reassign(int src, int dst) {
     }
 
     /* Indicating that victim is from an external source */
-    if(rebal_source_ext){
+    if(realloc_source){
          if (dst < SLAB_GLOBAL_PAGE_POOL || dst > power_largest)
             return REASSIGN_BADCLASS;
     }
-    else if(rebal_dest_ext){
+    else if(realloc_destination){
         if (src < POWER_SMALLEST        || src > power_largest )
             return REASSIGN_BADCLASS;
 
@@ -1418,8 +1601,8 @@ void slabs_stats_file_write(FILE *f, FILE *f2,struct thread_stats thread_stats){
 }
 
 void force_reassign(int d){
-    rebal_source_ext = false; 
-    rebal_dest_ext   = false;
+    realloc_source = TENANT_SLAB; 
+    realloc_destination   = TENANT_SLAB;
     int counter = 0; //make sure we are not stuck in case there are no more slabs left
     do {
         if (counter++ > power_largest - POWER_SMALLEST + 1)
@@ -1431,12 +1614,29 @@ void force_reassign(int d){
     do_slabs_reassign(prev_victim,d);
 }
 
+void check_timeout(){
+    if(start_t == 0)
+        start_t = clock();
+    end_t = clock();
+    float seconds = (end_t - start_t) / CLOCKS_PER_SEC;
+
+    if(seconds > 5){
+        aborted = true;
+        printf("Timeout. Aborting..\n");
+        reset_locks();
+        rdma_page_transfer_in_progress = false; 
+        reset_remote_spare();
+        start_t = 0;
+        end_t = 0;
+    }
+}
+
 void waitForSpare(){ // wait for a fresh page
 
     if(pages_to_request == 0 || aborted /*|| total_received_pages - total_released_pages >= 600*/){ // 3rd condition for size threshold
         slab_rebalance_signal = 0;  
-        rebal_source_ext = false;
-        rebal_dest_ext   = false;
+        realloc_source = TENANT_SLAB;
+        realloc_destination   = TENANT_SLAB;
         aborted = false;
         time_elapsed = 0;  
     }
@@ -1450,155 +1650,194 @@ void waitForSpare(){ // wait for a fresh page
             total_received_pages++;
             printf("\nExternal REASSIGN: Received 1 page(s) for class %d, Needs %d more\n", slab_rebal.d_clsid,pages_to_request);
             slab_rebal.s_clsid = get_spare_clsid();
-            rebal_source_ext = true;
-            rebal_dest_ext   = false;
+            realloc_source = TENANT_LOCAL;
+            realloc_destination   = TENANT_SLAB;
             is_taken_careof  = false;    
             slab_rebalance_signal = 1;
         }
+        else if(is_remote_spare_received()){
+            pages_to_request--;
+            total_received_pages++;
+            printf("\nREMOTE REASSIGN: Received 1 page(s) for class %d, Needs %d more\n", slab_rebal.d_clsid,pages_to_request);
+            //slab_rebal.s_clsid = get_spare_clsid(); // NEEDS to BE DONE FOR RDMA CASE
+            realloc_source = TENANT_REMOTE;
+            realloc_destination   = TENANT_SLAB;
+            slab_rebalance_signal = 1;
+            reset_remote_spare();
+            start_t = 0;
+            end_t = 0;
+        }
         else{
+            if(rdma_page_transfer_in_progress){
+                return;
+            }
+            if(is_remote_server_available(settings.port)){
+                start_rdma_server();
+                return;
+            }
+            else{
+                rdma_broadcast();
+                return;
+            }
             req_spare();
-            if(start_t == 0)
-                start_t = clock();
-            end_t = clock();
-            float seconds = (end_t - start_t) / CLOCKS_PER_SEC;
-
-            if(seconds > 5){
-                aborted = true;
-                printf("Timeout. Aborting..\n");
-                reset_locks(); 
-            }
+            check_timeout();
         }
     }
 }
 
-void find_lowest_mu(){
+/* RDMA connection routines */
 
-    double lowest_mu = 1000000000,mu = 0;
-    int temp = 0,cls_id = 0,page_id = -1;
+void * poll_cm(struct rdma_event_channel *ec){
 
-    sleep(1);
-    if(spare_needed()){
-        for(int i = POWER_SMALLEST;i <= power_largest;i++)
-            if(i != prev_victim && slabclass[i].slabs > 10)
-                for(int j = 0;j <= slabclass[i].slabs - 10;j++){
-                    //printf("page %d : %d\n",j,slabclass[5].shadowq_hits[j]);
-                    if(mem_avail > 2000000){
-                        cls_id = -2;
-                        page_id = -2;
-                        break;
-                    }
-                    if(slabclass[i].hits[j] == 0){
-                        cls_id = i;
-                        page_id = j;
-                        break;
-                    }
-                    else{
-                        // temp = 0;
-                        // for(int k = j;k >= 0;k--)
-                        //     temp += slabclass[i].hits[k];
-                        // mu = (double) temp / (j+1);
-                        if(slabclass[i].hits[j] < lowest_mu){
-                            lowest_mu = slabclass[i].hits[j];
-                            cls_id = i;
-                            page_id = j;
-                        }
-                    }
-                }
+    struct rdma_cm_event *event = NULL;
+    struct rdma_cm_event event_copy;
 
-        if(cls_id != 0 && page_id != -1 && slab_rebalance_signal == 0 && lock_spare()){
-            if(cls_id == -2 && page_id == -2){
-                total_released_pages++;
-                printf("\nExternal REASSIGN: Releasing Memory (Free Space) \n");
-                signal_alloc_free((settings.port - 11212) % 4,1047840);
-                struct tracker trck = get_tracker();
-                mem_limit = trck.preset_share[(settings.port - 11212) % 4];
-                //mem_limit -= ( (slabclass[1].size * slabclass[1].perslab/(sysconf(_SC_PAGESIZE)) ) + 1) * (sysconf(_SC_PAGESIZE));
-                mem_avail = mem_limit - mem_malloced;
-                printf("total allocated mem(this): %lu\n", mem_malloced);
-                printf("free mem(this): %lu\n", mem_avail);
-                unlock_spare();  
-            }
-            else {
-                is_taken_careof = false;
-                rebal_dest_ext  = true;
-                slab_to_release = page_id;
-                prev_victim = cls_id;
-                total_released_pages++;
-                printf("\nExternal REASSIGN: Releasing Memory from class %d (slab %d)\n", cls_id, page_id);
-                do_slabs_reassign(cls_id,-2);  // -2 means it's located in another tenant
-            }
-        }   
-        
+    while (rdma_get_cm_event(ec, &event) == 0){
+        memcpy(&event_copy, event, sizeof(*event));
+        rdma_ack_cm_event(event);
+
+        if (on_event(&event_copy))
+            break;
     }
-    
+    remove_rdma_connection(event_copy.id);
+    rdma_destroy_id(event_copy.id);
+    rdma_destroy_event_channel(ec);
 }
 
-void find_highest_mu(uint64_t misses, double hitrate){
+void start_rdma_server(){
 
-    double highest_mu = 0,mu = 0;
-    int temp = 0,cls_id = 0,shadow_page_id = -1;
+    struct rdma_cm_id * c = lookup_rdma_connection(get_tracker().rdma_peer_addr);
+    if(c){
+        set_rdma_access_port(ntohs(rdma_get_src_port(c)));
+        post_receives(c->context);
+        rdma_page_transfer_in_progress = true;
+        return;
+    }
 
-    if(timee > 1 && timee <= 10){
-        if(hitrate > 1)
-            avghitrate = ((avghitrate * (timee - 1)) + hitrate) /timee;
-        if(hitrate > maxhitrate)
-            maxhitrate = hitrate;
-    }
-    else
-    {
-        //printf("max hitrate: %f, avg hitrate:%f, crrent hitrate:%f, deviation: %f\n", maxhitrate,avghitrate,hitrate,maxhitrate - hitrate);
-    }
-    
-    if(!is_spare_avail()){                                          // Someone has reqeusted for a spare page
-        //if(total_released_pages - total_received_pages <= 200)
-        //if(maxhitrate - hitrate < 0.2)
-            find_lowest_mu();
-        //else if(total_released_pages - total_received_pages > 200)
-        //else if(maxhitrate - hitrate > 0.2)
-            //printf("threshold reached!!!!\n");
-    }
-        
-    if(total_misses != misses){
-        total_misses = misses;
+    rdma_page_transfer_in_progress = true;
 
-        if(slab_rebalance_signal == 0){
-            
-            for(int i = POWER_SMALLEST;i <= power_largest;i++)
-                if(slabclass[i].slabs > 0)
-                    for(int j = 3999;j >= 0;j--){
-                        //printf("page %d : %d\n",j,slabclass[5].shadowq_hits[j]);
-                        if(slabclass[i].shadowq_hits[j] > /*(j+1) * */SHADOWQ_HIT_THRESHOLD){
-                            temp = 0;
-                            for(int k = j;k >= 0;k--)
-                                temp += slabclass[i].shadowq_hits[k];
-                            mu = (double) temp / (j+1);
-                            if(mu > highest_mu){
-                                highest_mu = mu;
-                                cls_id = i;
-                                shadow_page_id = j;
-                            }
-                        }
-                    }
+    struct sockaddr_in client_addr;
+    struct rdma_cm_id *conn = NULL;
+    struct rdma_event_channel *ec = NULL;
+    uint16_t port = 0;
 
-            if(cls_id != 0 && shadow_page_id != -1 && req_spare()){
-                
-                for(int k = shadow_page_id;k >= 0;k--)
-                    slabclass[cls_id].shadowq_hits[k] = 0;
-                
-                start_t = 0;
-                end_t = 0;
-                pages_to_request = shadow_page_id + 1;
-                printf("\nExternal REASSIGN: Requested %d page(s) for class %d\n",pages_to_request, cls_id);
-                do_slabs_reassign(1000,cls_id);
+    /* Server-side preparation - All tenants are servers by default*/
 
-            }
-        }
+    printf("\nListening for connections ");
+    TEST_Z(ec = rdma_create_event_channel());
+    TEST_NZ(rdma_create_id(ec, &conn, NULL, RDMA_PS_TCP));
+
+    memset(&client_addr, 0, sizeof(client_addr));
+    client_addr.sin_family = AF_INET;
+    TEST_NZ(rdma_bind_addr(conn, (struct sockaddr *)&client_addr)); // Bind to an empty address for the potential client
+    TEST_NZ(rdma_listen(conn, 10)); 
+
+    port = ntohs(rdma_get_src_port(conn));
+    printf("on port: %d\n", port);
+    set_rdma_access_port(port);
+
+    conn->context = malloc(sizeof(struct connection));
+    add_rdma_connection(conn);
+
+    TEST_NZ(pthread_create(&((struct connection *)conn->context)->cm_poller_thread, NULL, poll_cm, ec));
+}
+
+void start_rdma_client(){
+
+    struct rdma_cm_id * c = lookup_rdma_connection(get_tracker().rdma_peer_addr);
+    if(c){
+        send_remote_page(c->context);
+        rdma_page_transfer_in_progress = true;
+        return;
     }
-    else if(slab_rebalance_signal == 10){
-        aborted = true;
-        pages_to_request = 0;
-        printf("\nExternal REASSIGN: Aborted!\n");
+
+    rdma_page_transfer_in_progress = true;
+
+    char ip[INET_ADDRSTRLEN], port[INET_ADDRSTRLEN];
+    struct addrinfo *addr;
+    struct rdma_cm_id *conn = NULL;
+    struct rdma_event_channel *ec = NULL;
+
+    /* Client-side preparation - A server that wants to access another server i.e., a client*/
+
+    TEST_Z(ec = rdma_create_event_channel());
+    TEST_NZ(rdma_create_id(ec, &conn, NULL, RDMA_PS_TCP));
+
+    struct sockaddr_in sa = get_tracker().rdma_peer_addr;
+    inet_ntop( AF_INET, &sa.sin_addr, ip, INET_ADDRSTRLEN );
+    sprintf(port, "%d", sa.sin_port);
+
+    printf("\n--Initiating access to a remote server. IP: %s, Port: %s\n",ip, port);
+    TEST_NZ(getaddrinfo(ip, port, NULL, &addr));
+    TEST_NZ(rdma_resolve_addr(conn, NULL, addr->ai_addr, TIMEOUT_IN_MS));
+
+    conn->context = malloc(sizeof(struct connection));
+    add_rdma_connection(conn);
+
+    TEST_NZ(pthread_create(&((struct connection *)conn->context)->cm_poller_thread, NULL, poll_cm, ec));
+
+}
+
+int on_addr_resolved(struct rdma_cm_id *id){
+    printf("address resolved.");
+    build_connection(id);
+    sprintf(get_local_message_region(id->context), "message from active/client side with pid %d", getpid());
+    TEST_NZ(rdma_resolve_route(id, TIMEOUT_IN_MS));
+
+    return 0;
+}
+
+int on_route_resolved(struct rdma_cm_id *id){
+    printf(" route resolved.\n");
+    struct rdma_conn_param cm_params;
+    build_params(&cm_params);
+    TEST_NZ(rdma_connect(id, &cm_params));
+
+    return 0;
+}
+
+int on_connect_request(struct rdma_cm_id *id){
+    struct rdma_conn_param cm_params;
+    printf("received connection request.\n");
+    build_connection(id);
+    build_params(&cm_params);
+    sprintf(get_local_message_region(id->context), "message from passive/server side with pid %d", getpid());
+    TEST_NZ(rdma_accept(id, &cm_params));
+
+    return 0;
+}
+
+int on_connection(struct rdma_cm_id *id){
+    on_connect(id->context);
+    send_remote_page(id->context);
+    return 0;
+}
+
+int on_disconnect(struct rdma_cm_id *id){
+    printf("peer disconnected.\n");
+    destroy_connection(id->context);
+    return 1;
+}
+
+int on_event(struct rdma_cm_event *event){
+    int r = 0;
+
+    if (event->event == RDMA_CM_EVENT_CONNECT_REQUEST)
+        r = on_connect_request(event->id);
+    else if (event->event == RDMA_CM_EVENT_ADDR_RESOLVED)
+        r = on_addr_resolved(event->id);
+    else if (event->event == RDMA_CM_EVENT_ROUTE_RESOLVED)
+        r = on_route_resolved(event->id);
+    else if (event->event == RDMA_CM_EVENT_ESTABLISHED)
+        r = on_connection(event->id);
+    else if (event->event == RDMA_CM_EVENT_DISCONNECTED)
+        r = on_disconnect(event->id);
+    else {
+        fprintf(stderr, "on_event: %d\n", event->event);
+        die("on_event: unknown event.");
     }
+
+    return r;
 }
 
 void calculate_scores(uint64_t misses){
@@ -1650,64 +1889,55 @@ void calculate_scores(uint64_t misses){
                 }
 
         // APPROACH 1: CALCULATE SCORES
-        double score1 = (misses - total_misses) * highest_mu * (time_elapsed * (total_released_pages + 1) ) / (total_received_pages * (mem_malloced / 1000000) + 1);
-        double score2 = (misses - total_misses) * lowest_mu * (time_elapsed * total_released_pages) / (total_received_pages * (mem_malloced / 1000000) + 1);  
-        set_scores(score1,score2,settings.port);
+        latest_score1 = (misses - total_misses) * highest_mu * (time_elapsed * (total_released_pages + 1) ) / (total_received_pages * ((mem_malloced + mem_malloced_remote) / 1000000) + 1);
+        latest_score2 = (misses - total_misses) * lowest_mu * (time_elapsed * total_released_pages) / (total_received_pages * ((mem_malloced + mem_malloced_remote) / 1000000) + 1);  
+        set_scores(latest_score1,latest_score2,settings.port);
     
-        if(spare_needed()){
-            if(compare_minID(settings.port, score2)){
+        if(spare_needed() || (remote_spare_needed(settings.port) && !rdma_page_transfer_in_progress)){
+            if(compare_minID(settings.port, latest_score2) > 2 && !is_spare_avail()){              // I'm the Victim
 
-                wasmin_count++;
-
-                if(wasmin_count >= 2 && !is_spare_avail()){       // I'm the Victim
-
-                    wasmin_count = 0;
-
-                    if(cls_id2 != 0 && page_id2 != -1 && lock_spare()){
-                        if(cls_id2 == -2 && page_id2 == -2){
-                            total_released_pages++;
-                            printf("\nExternal REASSIGN: Releasing Memory (Free Space) \n");
-                            signal_alloc_free((settings.port - 11212) % 4,1047840);
-                            struct tracker trck = get_tracker();
-                            mem_limit = trck.preset_share[(settings.port - 11212) % 4];
-                            //mem_limit -= ( (slabclass[1].size * slabclass[1].perslab/(sysconf(_SC_PAGESIZE)) ) + 1) * (sysconf(_SC_PAGESIZE));
-                            mem_avail = mem_limit - mem_malloced;
-                            printf("total allocated mem(this): %lu\n", mem_malloced);
-                            printf("free mem(this): %lu\n", mem_avail);
-                            unlock_spare();  
-                        }
-                        else {
-                            is_taken_careof = false;
-                            rebal_dest_ext  = true;
-                            slab_to_release = page_id2;
-                            prev_victim = cls_id2;
-                            total_released_pages++;
-                            printf("\nExternal REASSIGN: Releasing Memory from class %d (slab %d)\n", cls_id2, page_id2);
-                            do_slabs_reassign(cls_id2,-2);  // -2 means it's located in another tenant
-                        }
+                if(cls_id2 != 0 && page_id2 != -1 && lock_spare()){
+                    if(cls_id2 == -2 && page_id2 == -2){
+                        total_released_pages++;
+                        printf("\nExternal REASSIGN: Releasing Memory (Free Space) \n");
+                        signal_alloc_free((settings.port - 11212) % 4,1047840);
+                        struct tracker trck = get_tracker();
+                        mem_limit = trck.preset_share[(settings.port - 11212) % 4];
+                        //mem_limit -= ( (slabclass[1].size * slabclass[1].perslab/(sysconf(_SC_PAGESIZE)) ) + 1) * (sysconf(_SC_PAGESIZE));
+                        mem_avail = mem_limit - (mem_malloced + mem_malloced_remote);
+                        printf("total allocated mem(this-local): %lu   (this-remote): %lu\n", mem_malloced, mem_malloced_remote);
+                        printf("free mem(this): %lu\n", mem_avail);
+                        unlock_spare();  
                     }
-                } 
+                    else {
+                        is_taken_careof = false;
+                        realloc_destination  = TENANT_LOCAL;
+                        slab_to_release = page_id2;
+                        prev_victim = cls_id2;
+                        total_released_pages++;
+                        printf("\nExternal REASSIGN: Releasing Memory from class %d (slab %d)\n", cls_id2, page_id2);
+                        do_slabs_reassign(cls_id2,-2);  // -2 means it's located in another tenant
+                    }
+
+                    if(remote_spare_needed(settings.port))
+                        realloc_destination = TENANT_REMOTE;
+                }
             }
         }
         else{
-            if(compare_maxID(settings.port, score1)){
+            //check_timeout();
+            if(compare_maxID(settings.port, latest_score1) > 2){           // Victor
 
-                wasmax_count++;
-        
-                if(wasmax_count >= 2){       // Victor
+                if(cls_id != 0 && shadow_page_id != -1 && req_spare()){
+                    for(int k = shadow_page_id;k >= 0;k--)
+                        slabclass[cls_id].shadowq_hits[k] = 0;
+                    
+                    pages_to_request = shadow_page_id + 1;
+                    start_t = 0;
+                    end_t = 0;
+                    printf("\nExternal REASSIGN: Requested %d page(s) for class %d\n",pages_to_request, cls_id);
+                    do_slabs_reassign(1000,cls_id);
 
-                    wasmax_count = 0;
-
-                    if(cls_id != 0 && shadow_page_id != -1 && req_spare()){
-                        for(int k = shadow_page_id;k >= 0;k--)
-                            slabclass[cls_id].shadowq_hits[k] = 0;
-                        
-                        pages_to_request = shadow_page_id + 1;
-                        start_t = 0;
-                        end_t = 0;
-                        printf("\nExternal REASSIGN: Requested %d page(s) for class %d\n",pages_to_request, cls_id);
-                        do_slabs_reassign(1000,cls_id);
-                    }
                 }
             }
         }
@@ -1716,7 +1946,7 @@ void calculate_scores(uint64_t misses){
         if(slab_rebalance_signal == 10 && total_misses == misses){
                     pages_to_request == 0;
                     aborted = true;
-                    printf("\nExternal REASSIGN: Aborted!\n");
+                    printf("\nExternal REASSIGN: Aborted! No MISSES.\n");
         }
     }
 

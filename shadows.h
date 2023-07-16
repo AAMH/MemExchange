@@ -44,6 +44,11 @@ typedef struct {
 
     uint32_t hits[4000];
 
+/*** Remote memory access Additions ***/
+    uint32_t *rkey;
+    struct connection **conn;
+    void *rslots;
+    
 /*** shadow queue Additions ***/
     shadow_item *shadowq_head;
     shadow_item *shadowq_tail;

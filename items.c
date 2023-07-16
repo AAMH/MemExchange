@@ -335,6 +335,18 @@ item *do_item_alloc(char *key, const size_t nkey, const unsigned int flags,
     }
     it->h_next = 0;
 
+    /* Here we check if this is a temp item and commit to the remote location if needed*/
+    if(it->r_it) {
+        //printf("-Using a remote item. class: %d \n", it->slabs_clsid);
+        it->r_it->key = key; /// maybe memcpy()???
+        it->r_it->nkey = nkey;
+        //memcpy(it->r_it->key, key, nkey);
+        
+        slabs_rdma_insert(it->r_it);
+        
+        set_remote_item(it);    // send the item over to the remote host
+    }
+
     return it;
 }
 

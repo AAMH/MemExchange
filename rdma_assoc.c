@@ -11,41 +11,29 @@
  * The rest of the file is licensed under the BSD license.  See LICENSE.
  */
 
+#include "rdma_util.h"
 #include "memcached.h"
-#include <sys/stat.h>
-#include <sys/socket.h>
-#include <sys/resource.h>
-#include <signal.h>
-#include <fcntl.h>
-#include <netinet/in.h>
-#include <errno.h>
-#include <stdlib.h>
-#include <stdio.h>
-#include <string.h>
-#include <assert.h>
-#include <pthread.h>
 
-static pthread_cond_t maintenance_cond = PTHREAD_COND_INITIALIZER;
-static pthread_mutex_t maintenance_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_mutex_t hash_items_counter_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t maintenance_rdma_cond = PTHREAD_COND_INITIALIZER;
+static pthread_mutex_t maintenance_rdma_lock = PTHREAD_MUTEX_INITIALIZER;
 
 typedef  unsigned long  int  ub4;   /* unsigned 4-byte quantities */
 typedef  unsigned       char ub1;   /* unsigned 1-byte quantities */
 
 /* how many powers of 2's worth of buckets we use */
-unsigned int hashpower = HASHPOWER_DEFAULT;
+unsigned int rdma_hashpower = HASHPOWER_DEFAULT;
 
 #define hashsize(n) ((ub4)1<<(n))
 #define hashmask(n) (hashsize(n)-1)
 
 /* Main hash table. This is where we look except during expansion. */
-static item** primary_hashtable = 0;
+static remote_item** primary_hashtable = 0;
 
 /*
  * Previous hash table. During expansion, we look here for keys that haven't
  * been moved over to the primary yet.
  */
-static item** old_hashtable = 0;
+static remote_item** old_hashtable = 0;
 
 /* Number of items in the hash table. */
 static unsigned int hash_items = 0;
@@ -56,45 +44,41 @@ static bool started_expanding = false;
 
 /*
  * During expansion we migrate values with bucket granularity; this is how
- * far we've gotten so far. Ranges from 0 .. hashsize(hashpower - 1) - 1.
+ * far we've gotten so far. Ranges from 0 .. hashsize(rdma_hashpower - 1) - 1.
  */
 static unsigned int expand_bucket = 0;
 
-void assoc_init(const int hashtable_init) {
+void rdma_assoc_init(const int hashtable_init) {
     if (hashtable_init) {
-        hashpower = hashtable_init;
+        rdma_hashpower = hashtable_init;
     }
-    primary_hashtable = calloc(hashsize(hashpower), sizeof(void *));
+    primary_hashtable = calloc(hashsize(rdma_hashpower), sizeof(void *));
     if (! primary_hashtable) {
         fprintf(stderr, "Failed to init hashtable.\n");
         exit(EXIT_FAILURE);
     }
     STATS_LOCK();
-    stats_state.hash_power_level = hashpower;
-    stats_state.hash_bytes = hashsize(hashpower) * sizeof(void *);
+    stats_state.hash_power_level = rdma_hashpower;
+    stats_state.hash_bytes = hashsize(rdma_hashpower) * sizeof(void *);
     STATS_UNLOCK();
 }
 
-item *assoc_find(const char *key, const size_t nkey, const uint32_t hv) {
-    item *it;
+remote_item *rdma_assoc_find(const char *key, const size_t nkey, const uint32_t hv) {
+    remote_item *it;
     unsigned int oldbucket;
 
     if (expanding &&
-        (oldbucket = (hv & hashmask(hashpower - 1))) >= expand_bucket)
+        (oldbucket = (hv & hashmask(rdma_hashpower - 1))) >= expand_bucket)
     {
         it = old_hashtable[oldbucket];
     } else {
-        it = primary_hashtable[hv & hashmask(hashpower)];
+        it = primary_hashtable[hv & hashmask(rdma_hashpower)];
     }
 
-    item *ret = NULL;
+    remote_item *ret = NULL;
     int depth = 0;
     while (it) {
-        // if(faccessat(it, 0, 0) == -1 && errno == EFAULT){
-        //     printf("NOT MY ADDRESS\n");
-            
-        // }
-        if ((nkey == it->nkey) && (memcmp(key, ITEM_key(it), nkey) == 0)) {
+        if ((nkey == it->nkey) && (memcmp(key, it->key, nkey) == 0)) {
             ret = it;
             break;
         }
@@ -108,39 +92,39 @@ item *assoc_find(const char *key, const size_t nkey, const uint32_t hv) {
 /* returns the address of the item pointer before the key.  if *item == 0,
    the item wasn't found */
 
-static item** _hashitem_before (const char *key, const size_t nkey, const uint32_t hv) {
-    item **pos;
+static remote_item** _hashitem_before (const char *key, const uint32_t hv) {
+    remote_item **pos;
     unsigned int oldbucket;
 
     if (expanding &&
-        (oldbucket = (hv & hashmask(hashpower - 1))) >= expand_bucket)
+        (oldbucket = (hv & hashmask(rdma_hashpower - 1))) >= expand_bucket)
     {
         pos = &old_hashtable[oldbucket];
     } else {
-        pos = &primary_hashtable[hv & hashmask(hashpower)];
+        pos = &primary_hashtable[hv & hashmask(rdma_hashpower)];
     }
 
-    while (*pos && ((nkey != (*pos)->nkey) || memcmp(key, ITEM_key(*pos), nkey))) {
+    while (*pos && ((*pos)->address != key)) {
         pos = &(*pos)->h_next;
     }
     return pos;
 }
 
 /* grows the hashtable to the next power of 2. */
-static void assoc_expand(void) {
+static void rdma_assoc_expand(void) {
     old_hashtable = primary_hashtable;
 
-    primary_hashtable = calloc(hashsize(hashpower + 1), sizeof(void *));
+    primary_hashtable = calloc(hashsize(rdma_hashpower + 1), sizeof(void *));
     if (primary_hashtable) {
         if (settings.verbose > 1)
             fprintf(stderr, "Hash table expansion starting\n");
-        hashpower++;
+        rdma_hashpower++;
         expanding = true;
         expand_bucket = 0;
         STATS_LOCK();
-        stats_state.hash_power_level = hashpower;
-        stats_state.hash_bytes += hashsize(hashpower) * sizeof(void *);
-        stats_state.hash_is_expanding = true;
+        stats_state.hash_power_level = rdma_hashpower;
+        stats_state.hash_bytes += hashsize(rdma_hashpower) * sizeof(void *);
+        stats_state.hash_is_expanding = 1;
         STATS_UNLOCK();
     } else {
         primary_hashtable = old_hashtable;
@@ -148,49 +132,44 @@ static void assoc_expand(void) {
     }
 }
 
-static void assoc_start_expand(void) {
+static void rdma_assoc_start_expand(void) {
     if (started_expanding)
         return;
 
     started_expanding = true;
-    pthread_cond_signal(&maintenance_cond);
+    pthread_cond_signal(&maintenance_rdma_cond);
 }
 
 /* Note: this isn't an assoc_update.  The key must not already exist to call this */
-int assoc_insert(item *it, const uint32_t hv) {
+int rdma_assoc_insert(remote_item *it, const uint32_t hv) {
     unsigned int oldbucket;
 
 //    assert(assoc_find(ITEM_key(it), it->nkey) == 0);  /* shouldn't have duplicately named things defined */
-
     if (expanding &&
-        (oldbucket = (hv & hashmask(hashpower - 1))) >= expand_bucket)
+        (oldbucket = (hv & hashmask(rdma_hashpower - 1))) >= expand_bucket)
     {
         it->h_next = old_hashtable[oldbucket];
         old_hashtable[oldbucket] = it;
     } else {
-        it->h_next = primary_hashtable[hv & hashmask(hashpower)];
-        primary_hashtable[hv & hashmask(hashpower)] = it;
+        it->h_next = primary_hashtable[hv & hashmask(rdma_hashpower)];
+        primary_hashtable[hv & hashmask(rdma_hashpower)] = it;
     }
 
-    pthread_mutex_lock(&hash_items_counter_lock);
     hash_items++;
-    if (! expanding && hash_items > (hashsize(hashpower) * 3) / 2) {
-        assoc_start_expand();
+    if (! expanding && hash_items > (hashsize(rdma_hashpower) * 3) / 2) {
+        rdma_assoc_start_expand();
     }
-    pthread_mutex_unlock(&hash_items_counter_lock);
 
-    MEMCACHED_ASSOC_INSERT(ITEM_key(it), it->nkey, hash_items);
+    MEMCACHED_ASSOC_INSERT(it->key, it->nkey, hash_items);
     return 1;
 }
 
-void assoc_delete(const char *key, const size_t nkey, const uint32_t hv) {
-    item **before = _hashitem_before(key, nkey, hv);
+void rdma_assoc_delete(const char *key, const uint32_t hv) {
+    remote_item **before = _hashitem_before(key, hv);
 
     if (*before) {
-        item *nxt;
-        pthread_mutex_lock(&hash_items_counter_lock);
+        remote_item *nxt;
         hash_items--;
-        pthread_mutex_unlock(&hash_items_counter_lock);
         /* The DTrace probe cannot be triggered as the last instruction
          * due to possible tail-optimization by the compiler
          */
@@ -206,31 +185,31 @@ void assoc_delete(const char *key, const size_t nkey, const uint32_t hv) {
 }
 
 
-static volatile int do_run_maintenance_thread = 1;
+static volatile int do_run_maintenance_thread = 0; //// was 1
 
 #define DEFAULT_HASH_BULK_MOVE 1
-int hash_bulk_move = DEFAULT_HASH_BULK_MOVE;
+static int hash_bulk_move = DEFAULT_HASH_BULK_MOVE;
 
-static void *assoc_maintenance_thread(void *arg) {
+static void *rdma_assoc_maintenance_thread(void *arg) {
 
-    mutex_lock(&maintenance_lock);
+    mutex_lock(&maintenance_rdma_lock);
     while (do_run_maintenance_thread) {
         int ii = 0;
 
         /* There is only one expansion thread, so no need to global lock. */
         for (ii = 0; ii < hash_bulk_move && expanding; ++ii) {
-            item *it, *next;
+            remote_item *it, *next;
             int bucket;
             void *item_lock = NULL;
 
-            /* bucket = hv & hashmask(hashpower) =>the bucket of hash table
+            /* bucket = hv & hashmask(rdma_hashpower) =>the bucket of hash table
              * is the lowest N bits of the hv, and the bucket of item_locks is
              *  also the lowest M bits of hv, and N is greater than M.
              *  So we can process expanding with only one item_lock. cool! */
             if ((item_lock = item_trylock(expand_bucket))) {
                     for (it = old_hashtable[expand_bucket]; NULL != it; it = next) {
                         next = it->h_next;
-                        bucket = hash(ITEM_key(it), it->nkey) & hashmask(hashpower);
+                        bucket = hash(&it->address, sizeof(void *)) & hashmask(rdma_hashpower);
                         it->h_next = primary_hashtable[bucket];
                         primary_hashtable[bucket] = it;
                     }
@@ -238,12 +217,12 @@ static void *assoc_maintenance_thread(void *arg) {
                     old_hashtable[expand_bucket] = NULL;
 
                     expand_bucket++;
-                    if (expand_bucket == hashsize(hashpower - 1)) {
+                    if (expand_bucket == hashsize(rdma_hashpower - 1)) {
                         expanding = false;
                         free(old_hashtable);
                         STATS_LOCK();
-                        stats_state.hash_bytes -= hashsize(hashpower - 1) * sizeof(void *);
-                        stats_state.hash_is_expanding = false;
+                        stats_state.hash_bytes -= hashsize(rdma_hashpower - 1) * sizeof(void *);
+                        stats_state.hash_is_expanding = 0;
                         STATS_UNLOCK();
                         if (settings.verbose > 1)
                             fprintf(stderr, "Hash table expansion done\n");
@@ -262,8 +241,8 @@ static void *assoc_maintenance_thread(void *arg) {
         if (!expanding) {
             /* We are done expanding.. just wait for next invocation */
             started_expanding = false;
-            pthread_cond_wait(&maintenance_cond, &maintenance_lock);
-            /* assoc_expand() swaps out the hash table entirely, so we need
+            pthread_cond_wait(&maintenance_rdma_cond, &maintenance_rdma_lock);
+            /* rdma_assoc_expand() swaps out the hash table entirely, so we need
              * all threads to not hold any references related to the hash
              * table while this happens.
              * This is instead of a more complex, possibly slower algorithm to
@@ -271,7 +250,7 @@ static void *assoc_maintenance_thread(void *arg) {
              * wait times.
              */
             pause_threads(PAUSE_ALL_THREADS);
-            assoc_expand();
+            rdma_assoc_expand();
             pause_threads(RESUME_ALL_THREADS);
         }
     }
@@ -280,7 +259,7 @@ static void *assoc_maintenance_thread(void *arg) {
 
 static pthread_t maintenance_tid;
 
-int start_assoc_maintenance_thread() {
+int rdma_start_assoc_maintenance_thread() {
     int ret;
     char *env = getenv("MEMCACHED_HASH_BULK_MOVE");
     if (env != NULL) {
@@ -289,22 +268,97 @@ int start_assoc_maintenance_thread() {
             hash_bulk_move = DEFAULT_HASH_BULK_MOVE;
         }
     }
-    pthread_mutex_init(&maintenance_lock, NULL);
+    pthread_mutex_init(&maintenance_rdma_lock, NULL);
     if ((ret = pthread_create(&maintenance_tid, NULL,
-                              assoc_maintenance_thread, NULL)) != 0) {
+                              rdma_assoc_maintenance_thread, NULL)) != 0) {
         fprintf(stderr, "Can't create thread: %s\n", strerror(ret));
         return -1;
     }
     return 0;
 }
 
-void stop_assoc_maintenance_thread() {
-    mutex_lock(&maintenance_lock);
+void rdma_stop_assoc_maintenance_thread() {
+    mutex_lock(&maintenance_rdma_lock);
     do_run_maintenance_thread = 0;
-    pthread_cond_signal(&maintenance_cond);
-    mutex_unlock(&maintenance_lock);
+    pthread_cond_signal(&maintenance_rdma_cond);
+    mutex_unlock(&maintenance_rdma_lock);
 
     /* Wait for the maintenance thread to stop */
     pthread_join(maintenance_tid, NULL);
 }
 
+remote_item* slabs_rdma_lookup(char *key, const size_t nkey) {
+    uint32_t hv = hash(key, nkey);
+    remote_item* rdma_it = rdma_assoc_find(key, nkey, hv);
+
+    return rdma_it;
+}
+
+void slabs_rdma_insert(remote_item *it) {
+    uint32_t hv = hash(it->key, it->nkey);
+    int x = rdma_assoc_insert(it, hv);
+} 
+
+item* get_remote_item(remote_item* r_it){     /* contact the remote host and get the item*/
+
+    slabclass_t *p = (slabclass_t *) get_slabclass(r_it->slabs_clsid);
+    struct connection *conn = p->conn[r_it->page_id];
+
+    struct ibv_send_wr wr, *bad_wr = NULL;
+    struct ibv_sge sge;
+
+    printf("Attempting to read remotely...\n");
+
+    memset(&wr, 0, sizeof(wr));
+
+    conn->send_msg->type = MSG_L_MR;
+
+    wr.wr_id = (uintptr_t)conn;
+    wr.opcode = IBV_WR_RDMA_READ;
+    wr.sg_list = &sge;
+    wr.num_sge = 1;
+    wr.send_flags = IBV_SEND_SIGNALED; // ???
+    wr.wr.rdma.remote_addr = (uintptr_t)r_it->address;
+    wr.wr.rdma.rkey = p->rkey[r_it->page_id];
+
+    memset(conn->rdma_local_region, 0, sizeof(struct _stritem));
+    sge.addr = (uintptr_t)conn->rdma_local_region;
+    sge.length = sizeof(struct _stritem);
+    sge.lkey = conn->rdma_local_mr->lkey;
+
+    TEST_NZ(ibv_post_send(conn->qp, &wr, &bad_wr));
+
+    return (item *)conn->rdma_local_region;
+}
+
+void set_remote_item(item *it){
+
+    remote_item * r_it = it->r_it;
+    slabclass_t *p = (slabclass_t *) get_slabclass(r_it->slabs_clsid);
+    struct connection *conn = p->conn[r_it->page_id];
+
+    struct ibv_send_wr wr, *bad_wr = NULL;
+    struct ibv_sge sge;
+
+    printf("Attempting to write remotely...\n");
+
+    memset(&wr, 0, sizeof(wr));
+
+    conn->send_msg->type = MSG_L_MR;
+
+    wr.wr_id = (uintptr_t)conn;
+    wr.opcode = IBV_WR_RDMA_WRITE;
+    wr.sg_list = &sge;
+    wr.num_sge = 1;
+    wr.send_flags = IBV_SEND_SIGNALED; // ???
+    wr.wr.rdma.remote_addr = (uintptr_t)r_it->address;
+    wr.wr.rdma.rkey = p->rkey[r_it->page_id];
+
+    sge.addr = (uintptr_t) it;      // item is already part of the local region, so should be good.
+    sge.length = sizeof(struct _stritem);
+    sge.lkey = conn->rdma_local_mr->lkey;
+
+    if(ibv_post_send(conn->qp, &wr, &bad_wr)){
+        printf("ibv_post_send failed. ERROR: %s\n", strerror(errno));
+    }
+}
