@@ -1,7 +1,4 @@
-/* Source: https://github.com/tarickb/the-geek-in-the-corner/tree/master/02_read-write*/
 #include "rdma_util.h"
-
-
 
 struct rdma_cm_id * lookup_rdma_connection(struct sockaddr_in peer_addr){
 
@@ -127,10 +124,10 @@ void build_qp_attr(struct ibv_qp_init_attr *qp_attr){
     qp_attr->recv_cq = s_ctx->cq;
     qp_attr->qp_type = IBV_QPT_RC;
 
-    qp_attr->cap.max_send_wr = 10;
-    qp_attr->cap.max_recv_wr = 10;
-    qp_attr->cap.max_send_sge = 1;
-    qp_attr->cap.max_recv_sge = 1;
+    qp_attr->cap.max_send_wr = 1000;
+    qp_attr->cap.max_recv_wr = 1000;
+    qp_attr->cap.max_send_sge = 10;
+    qp_attr->cap.max_recv_sge = 10;
 }
 
 void destroy_connection(void *context){
@@ -140,12 +137,14 @@ void destroy_connection(void *context){
 
     ibv_dereg_mr(conn->send_mr);
     ibv_dereg_mr(conn->recv_mr);
-    ibv_dereg_mr(conn->rdma_local_mr);
+    ibv_dereg_mr(conn->rdma_local_mr_w);
+    ibv_dereg_mr(conn->rdma_local_mr_r);
     //ibv_dereg_mr(conn->rdma_remote_mr);
 
     free(conn->send_msg);
     free(conn->recv_msg);
-    free(conn->rdma_local_region);
+    free(conn->rdma_local_region_r);
+    free(conn->rdma_local_region_w);
     //free(conn->rdma_remote_region);
 
     rdma_destroy_id(conn->id);
@@ -154,7 +153,7 @@ void destroy_connection(void *context){
 }
 
 void * get_local_message_region(void *context){
-    return ((struct connection *)context)->rdma_local_region;
+    return ((struct connection *)context)->rdma_local_region_r;
 }
 
  char * get_peer_message_region(struct connection *conn){
@@ -175,7 +174,7 @@ void on_completion(struct ibv_wc *wc){
 
             conn->recv_state = RS_MR_RECV;
             memcpy(&conn->peer_mr, &conn->recv_msg->data.mr, sizeof(conn->peer_mr));
-            receive_remote_mem(conn, 1024 * 1024/*RDMA_BUFFER_SIZE*/, (get_tracker().max_id  - 11212) % 4); /// ???
+            receive_remote_mem(conn, RDMA_BUFFER_SIZE, (get_tracker().max_id  - 11212) % 4); /// ???
 
             printf("Page allocated in remote tenant. ");
             rdma_page_transfer_in_progress = false;
@@ -218,7 +217,7 @@ void on_completion(struct ibv_wc *wc){
     else{
         
         if (conn->send_msg->type == MSG_L_MR){
-            printf("Local MR sent.\n");
+            //printf("Local MR sent.\n");
             rdma_page_transfer_in_progress = false;
         }
 
@@ -245,16 +244,23 @@ void on_connect(void *context){
 }
 
 void * poll_cq(void *ctx){
+    int batch_size = 10;
+    int i = 0;
     struct ibv_cq *cq;
-    struct ibv_wc wc;
+    struct ibv_wc *wc = (struct ibv_wc *) malloc(batch_size * sizeof(struct ibv_wc));
+    memset(wc, 0, batch_size * sizeof(struct ibv_wc));
 
     while (1) {
         TEST_NZ(ibv_get_cq_event(s_ctx->comp_channel, &cq, &ctx));
         ibv_ack_cq_events(cq, 1);
         TEST_NZ(ibv_req_notify_cq(cq, 0));
 
-        while (ibv_poll_cq(cq, 1, &wc))
-            on_completion(&wc);
+        while (ibv_poll_cq(cq, batch_size, wc)){
+            i = 0;
+            while((wc + i)->byte_len != 0)
+                on_completion(wc + (i++));
+            memset(wc, 0, batch_size * sizeof(struct ibv_wc));
+        }
 
         if (should_stop_polling)
             break;
@@ -276,14 +282,23 @@ void post_receives(struct connection *conn){
     sge.length = sizeof(struct message);
     sge.lkey = conn->recv_mr->lkey;
 
-    TEST_NZ(ibv_post_recv(conn->qp, &wr, &bad_wr));
+    //TEST_NZ(ibv_post_recv(conn->qp, &wr, &bad_wr));
+    if(ibv_post_recv(conn->qp, &wr, &bad_wr) && errno != 0){
+        printf("ibv_post_recv failed(1). ERROR: %s\n", strerror(errno));
+    }
 }
 
 void register_memory(struct connection *conn){
     conn->send_msg = malloc(sizeof(struct message));
     conn->recv_msg = malloc(sizeof(struct message));
 
-    conn->rdma_local_region = malloc(RDMA_BUFFER_SIZE);
+    conn->rdma_local_region_r = malloc(RDMA_BUFFER_SIZE);
+    conn->rdma_local_region_w = malloc(RDMA_BUFFER_SIZE);
+
+    last_used_addr = conn->rdma_local_region_r;
+
+    sge_send = (struct ibv_sge *) malloc(sizeof(struct ibv_sge) * batch_size);
+    wr_list_send = (struct ibv_send_wr *) malloc(sizeof(struct ibv_send_wr) * batch_size);
 
     TEST_Z(conn->send_mr = ibv_reg_mr(
         s_ctx->pd, 
@@ -297,9 +312,15 @@ void register_memory(struct connection *conn){
         sizeof(struct message), 
         IBV_ACCESS_LOCAL_WRITE));
 
-    TEST_Z(conn->rdma_local_mr = ibv_reg_mr(
+    TEST_Z(conn->rdma_local_mr_r = ibv_reg_mr(
         s_ctx->pd, 
-        conn->rdma_local_region, 
+        conn->rdma_local_region_r, 
+        RDMA_BUFFER_SIZE, 
+        IBV_ACCESS_LOCAL_WRITE));
+    
+    TEST_Z(conn->rdma_local_mr_w = ibv_reg_mr(
+        s_ctx->pd, 
+        conn->rdma_local_region_w, 
         RDMA_BUFFER_SIZE, 
         IBV_ACCESS_LOCAL_WRITE));
 }
@@ -322,7 +343,9 @@ void send_message(struct connection *conn){
 
     //while (!conn->connected);
 
-    TEST_NZ(ibv_post_send(conn->qp, &wr, &bad_wr));
+    if(ibv_post_send(conn->qp, &wr, &bad_wr) && errno != 0){
+        printf("ibv_post_send failed(2). ERROR: %s\n", strerror(errno));
+    }
 }
 
 void send_mr(void *context){
@@ -345,9 +368,10 @@ void send_remote_page(void *context) {    /* registers the latest released page 
         s_ctx->pd, 
         conn->rdma_remote_region, 
         RDMA_BUFFER_SIZE, 
-       (IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE)));
+       (IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ)));
 
-    
+    memset(conn->rdma_remote_region, 0, RDMA_BUFFER_SIZE);
+        
     conn->send_msg->type = MSG_R_MR;
     memcpy(&conn->send_msg->data.mr, conn->rdma_remote_mr, sizeof(struct ibv_mr));
 
@@ -355,3 +379,138 @@ void send_remote_page(void *context) {    /* registers the latest released page 
 
     remote_region = NULL;
 }
+
+char* get_remote_item(remote_item* r_it){     /* contact the remote host and get the item*/
+
+    slabclass_t *p = (slabclass_t *) get_slabclass(r_it->slabs_clsid);
+    struct connection *conn = p->conn[r_it->page_id];
+
+    struct ibv_send_wr wr, *bad_wr = NULL;
+    struct ibv_sge sge;
+
+    //printf("Attempting to read remotely...\n");
+
+    memset(&wr, 0, sizeof(wr));
+
+    conn->send_msg->type = MSG_L_MR;
+
+    wr.wr_id = (uintptr_t)conn;
+    wr.opcode = IBV_WR_RDMA_READ;
+    wr.sg_list = &sge;
+    wr.num_sge = 1;
+    wr.send_flags = IBV_SEND_SIGNALED;
+    wr.wr.rdma.remote_addr = (uintptr_t)r_it->address;
+    wr.wr.rdma.rkey = p->rkey[r_it->page_id];
+
+    last_used_addr += p->size;
+    if(last_used_addr + p->size >= conn->rdma_local_region_r + RDMA_BUFFER_SIZE)
+        last_used_addr = conn->rdma_local_region_r;
+
+    memset(last_used_addr, 0, p->size);
+    sge.addr = (uintptr_t)last_used_addr;
+    sge.length = p->size;
+    sge.lkey = conn->rdma_local_mr_r->lkey;
+        
+    if(ibv_post_send(conn->qp, &wr, &bad_wr)){
+        printf("ibv_post_send failed(0). ERROR: %d: %s\n", errno, strerror(errno));
+    }
+
+    while(((item *)last_used_addr)->nbytes == 0)
+        nanosleep(&((struct timespec){0,1}), &((struct timespec){0,0}));
+        
+    return last_used_addr;
+}
+
+void add_remote_set_entry(remote_item *r_it, item *it){
+
+    slabclass_t *p = (slabclass_t *) get_slabclass(r_it->slabs_clsid);
+    struct connection *conn = p->conn[r_it->page_id];
+    struct ibv_send_wr *bad_wr_send = NULL;
+
+    if(curr_wr_sge == 0){
+        memset(sge_send, 0, sizeof(struct ibv_sge) * batch_size);
+        memset(wr_list_send, 0, sizeof(struct ibv_send_wr) * batch_size);
+    }
+    else
+        wr_list_send[curr_wr_sge - 1].next = &wr_list_send[curr_wr_sge];
+        
+    wr_list_send[curr_wr_sge].wr_id = (uintptr_t)conn;
+    wr_list_send[curr_wr_sge].opcode = IBV_WR_RDMA_WRITE;
+    wr_list_send[curr_wr_sge].sg_list = &sge_send[curr_wr_sge];
+    wr_list_send[curr_wr_sge].num_sge = 1;
+    wr_list_send[curr_wr_sge].send_flags = IBV_SEND_SIGNALED;
+    wr_list_send[curr_wr_sge].wr.rdma.remote_addr = (uintptr_t)r_it->address;
+    wr_list_send[curr_wr_sge].wr.rdma.rkey = p->rkey[r_it->page_id];
+
+    memcpy(conn->rdma_local_region_w + curr_wr_sge * p->size, it, p->size);
+    sge_send[curr_wr_sge].addr = (uintptr_t)conn->rdma_local_region_w + curr_wr_sge * p->size;
+    sge_send[curr_wr_sge].length = p->size;
+    sge_send[curr_wr_sge++].lkey = conn->rdma_local_mr_w->lkey;
+
+    if(curr_wr_sge >= batch_size){
+        curr_wr_sge = 0;
+        conn->send_msg->type = MSG_L_MR;
+        if(ibv_post_send(conn->qp, wr_list_send, &bad_wr_send) && errno != 0){
+            printf("ibv_post_send failed(1). ERROR: %d: %s\n", errno, strerror(errno));
+        }
+    }
+
+}
+
+void set_remote_item(remote_item *r_it, item *it){
+
+    slabclass_t *p = (slabclass_t *) get_slabclass(r_it->slabs_clsid);
+    struct connection *conn = p->conn[r_it->page_id];
+
+    struct ibv_send_wr wr, *bad_wr = NULL;
+    struct ibv_sge sge;
+
+    //printf("Attempting to write remotely...\n");
+
+    memset(&wr, 0, sizeof(wr));
+
+    conn->send_msg->type = MSG_L_MR;
+
+    wr.wr_id = (uintptr_t)conn;
+    wr.opcode = IBV_WR_RDMA_WRITE;
+    wr.sg_list = &sge;
+    wr.num_sge = 1;
+    wr.send_flags = IBV_SEND_SIGNALED;
+    wr.wr.rdma.remote_addr = (uintptr_t)r_it->address;
+    wr.wr.rdma.rkey = p->rkey[r_it->page_id];
+
+    memcpy(conn->rdma_local_region_w, it, p->size);
+    sge.addr = (uintptr_t)conn->rdma_local_region_w;
+    sge.length = p->size;
+    sge.lkey = conn->rdma_local_mr_w->lkey;
+
+    if(ibv_post_send(conn->qp, &wr, &bad_wr) && errno != 0){
+        printf("ibv_post_send failed(1). ERROR: %d: %s\n", errno, strerror(errno));
+    }
+}
+
+remote_item* create_remote_item(u_int8_t clsid){
+    
+    remote_item* remote_it = (remote_item*) malloc(sizeof(struct _remitem));
+    memset(remote_it, 0, sizeof(struct _remitem));
+    assert(remote_it);
+    remote_it->next = NULL;
+    remote_it->prev = NULL;
+    remote_it->h_next = NULL;
+    remote_it->slabs_clsid = clsid;
+    //printf("Succesfully created remote item: %s\n", remote_it->key);
+    return remote_it;
+}
+
+remote_item* slabs_remoteq_lookup(char *key, const size_t nkey){
+
+    uint32_t hv = hash(key, nkey);
+    remote_item* remote_it = remote_assoc_find(key, nkey, hv);
+    return remote_it;
+}
+
+void slabs_rdma_insert(remote_item *it) {
+
+    uint32_t hv = hash(it->key, it->nkey);
+    remote_assoc_insert(it, hv);
+} 

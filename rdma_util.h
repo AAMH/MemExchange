@@ -8,52 +8,12 @@
 #include <unistd.h>
 #include <stdbool.h>
 #include <rdma/rdma_cma.h>
+
 #include "shm_malloc.h"
-#include "logger.h"
+#include "memcached.h"
 
-/**
- * Structure for storing items within memcached.
- */
-typedef struct _stritem {
-    /* Protected by LRU locks */
-    struct _stritem *next;
-    struct _stritem *prev;
-    /* Rest are protected by an item lock */
-    struct _stritem *h_next;    /* hash chain next */
-    rel_time_t      time;       /* least recent access */
-    rel_time_t      exptime;    /* expire time */
-    int             nbytes;     /* size of data */
-    unsigned short  refcount;
-    uint8_t         nsuffix;    /* length of flags-and-length string */
-    uint8_t         it_flags;   /* ITEM_* above */
-    uint8_t         slabs_clsid;/* which slab class we're in */
-    uint8_t         nkey;       /* key length, w/terminating null and padding */
-    uint16_t        page_id;    /* indicating the ID of the page containing this item */
-
-    struct _remitem *r_it;      /* NULL: item is Normal. NOT NULL: this is a temp item created for local operations
-                                 * in lieu of a remote item; should be commited to the remote host */
-
-    /* this odd type prevents type-punning issues when we do
-     * the little shuffle to save space when not using CAS. */
-    union {
-        uint64_t cas;
-        char end;
-    } data[];
-    /* if it_flags & ITEM_CAS we have 8 bytes CAS */
-    /* then null-terminated key */
-    /* then " flags length\r\n" (no terminating null) */
-    /* then data with terminating \r\n (no terminating null; it's binary!) */
-} item;
-
-#define TEST_NZ(x) do { if ( (x)) die("error: " #x " failed (returned non-zero)." ); } while (0)
-#define TEST_Z(x)  do { if (!(x)) die("error: " #x " failed (returned zero/null)."); } while (0)
-
-static const int RDMA_BUFFER_SIZE = 1024 * 1024;
-static bool should_stop_polling = false;
-static struct context *s_ctx = NULL;
-
-extern void * remote_region;
-extern struct rdma_cm_id *rdma_connections_head;
+#define TEST_NZ(x) do { if ( (x)) printf("error: " #x " failed (returned non-zero)." ); } while (0)
+#define TEST_Z(x)  do { if (!(x)) printf("error: " #x " failed (returned zero/null)."); } while (0)
 
 struct message {
     enum {
@@ -84,7 +44,8 @@ struct connection {
 
     struct ibv_mr *recv_mr;
     struct ibv_mr *send_mr;
-    struct ibv_mr *rdma_local_mr;
+    struct ibv_mr *rdma_local_mr_r;
+    struct ibv_mr *rdma_local_mr_w;
     struct ibv_mr *rdma_remote_mr;
 
     struct ibv_mr peer_mr;
@@ -92,7 +53,8 @@ struct connection {
     struct message *recv_msg;
     struct message *send_msg;
 
-    char *rdma_local_region;
+    char *rdma_local_region_r;
+    char *rdma_local_region_w;
     char *rdma_remote_region;
 
     struct connection *next;
@@ -113,23 +75,24 @@ struct connection {
     pthread_t cm_poller_thread;
 };
 
-typedef struct _remitem {
-    void            * address;     /* remote address of the item - RKEY can be obtained from the owner page */
-    struct _remitem * next;
-    struct _remitem * prev;
-    struct _remitem * h_next;      /* hash chain next */
-    
-    char            * key;        /* item key*/
-    uint8_t           nkey;       /* key length, w/terminating null and padding */
-    uint8_t           slabs_clsid;
-    uint16_t          page_id;    /* page id owning this item */
+static const int RDMA_BUFFER_SIZE = 1024 * 1024;
+static bool should_stop_polling = false;
+static struct context *s_ctx = NULL;
 
-} remote_item;
+extern void * remote_region;
+extern struct rdma_cm_id *rdma_connections_head;
+static pthread_mutex_t rdma_local_region_lock;
+static pthread_mutex_t rdma_local_region_lock2;
+static char * last_used_addr = NULL;
 
+static int batch_size = 10;
+static int curr_wr_sge = 0;
+static struct ibv_sge * sge_send = NULL;
+static struct ibv_send_wr * wr_list_send = NULL;
 
 void die(const char *reason);
 
-
+/* Handling Connections */
 void add_rdma_connection(struct rdma_cm_id * conn);
 void remove_rdma_connection(struct rdma_cm_id * conn);
 struct rdma_cm_id * lookup_rdma_connection(struct sockaddr_in peer_addr);
@@ -138,6 +101,8 @@ void build_connection(struct rdma_cm_id *id);
 void build_params(struct rdma_conn_param *params);
 void destroy_connection(void *context);
 void on_connect(void *context);
+
+/* Handling Memory Regions */
 void send_mr(void *context);
 
 void * get_local_message_region(void *context);
@@ -152,18 +117,21 @@ void post_receives(struct connection *conn);
 void register_memory(struct connection *conn);
 void send_message(struct connection *conn);
 
-/* HASH OPERATIONS for remote items*/
-void rdma_assoc_init(const int hashtable_init);
-remote_item *rdma_assoc_find(const char *key, const size_t nkey, const uint32_t hv);
-int rdma_assoc_insert(remote_item *it, const uint32_t hv);
-void rdma_assoc_delete(const char *key, const uint32_t hv);
-
-remote_item* slabs_rdma_lookup(char *key, const size_t nkey);
+/* Handling Remote Items */
+remote_item* create_remote_item(u_int8_t clsid);
+remote_item* slabs_remoteq_lookup(char *key, const size_t nkey);
 void slabs_rdma_insert(remote_item *it);
 
+/* HASH OPERATIONS for remote items*/
+void remote_assoc_init(const int hashtable_init);
+remote_item *remote_assoc_find(const char *key, const size_t nkey, const uint32_t hv);
+int remote_assoc_insert(remote_item *it, const uint32_t hv);
+void remote_assoc_delete(const char *key, const uint32_t hv);
+
 /* REMOTE OPERATIONS*/
-item* get_remote_item(remote_item* r_it);
-void set_remote_item(item *it);
+char* get_remote_item(remote_item* r_it);
+void set_remote_item(remote_item *r_it, item *it);
+void add_remote_set_entry(remote_item *r_it, item *it);
 void send_remote_page(void *context);
 
 #endif

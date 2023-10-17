@@ -1,7 +1,7 @@
 #ifndef SHM_MALLOC_H
 #define SHM_MALLOC_H
 
-#include<stdint.h>
+#include <stdint.h>
 #include <netinet/in.h>
 
 struct tracker {                /* Shared memory structure to keep track of current pointer */

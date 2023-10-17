@@ -796,7 +796,7 @@ void conn_close_idle(conn *c) {
 
         c->thread->stats.idle_kicks++;
 
-        conn_set_state(c, conn_closing);
+        conn_set_state(c, conn_closing);printf("-------------HERE 1\n");
         drive_machine(c);
     }
 }
@@ -1459,22 +1459,22 @@ static void complete_nread_ascii(conn *c) {
       }
 #endif
 
-      switch (ret) {
-      case STORED:
-          out_string(c, "STORED");
-          break;
-      case EXISTS:
-          out_string(c, "EXISTS");
-          break;
-      case NOT_FOUND:
-          out_string(c, "NOT_FOUND");
-          break;
-      case NOT_STORED:
-          out_string(c, "NOT_STORED");
-          break;
-      default:
-          out_string(c, "SERVER_ERROR Unhandled storage type.");
-      }
+    switch (ret) {
+        case STORED:
+            out_string(c, "STORED");
+            break;
+        case EXISTS:
+            out_string(c, "EXISTS");
+            break;
+        case NOT_FOUND:
+            out_string(c, "NOT_FOUND");
+            break;
+        case NOT_STORED:
+            out_string(c, "NOT_STORED");
+            break;
+        default:
+            out_string(c, "SERVER_ERROR Unhandled storage type.");
+    }
 
     }
 
@@ -1750,7 +1750,14 @@ static void complete_update_bin(conn *c) {
         ch->used += 2;
     }
 
-    ret = store_item(it, c->cmd, c);
+    if(it->r_it != NULL){
+        set_remote_item(it->r_it, it);
+        //add_remote_set_entry(it->r_it, it);
+        //printf("key: %s, data is %s\n", ITEM_key(it), ITEM_data(it));
+        ret = STORED;
+    }
+    else
+        ret = store_item(it, c->cmd, c);
 
 #ifdef ENABLE_DTRACE
     uint64_t cas = ITEM_get_cas(it);
@@ -1801,8 +1808,10 @@ static void complete_update_bin(conn *c) {
         }
         write_bin_error(c, eno, NULL, 0);
     }
-
-    item_remove(c->item);       /* release the c->item reference */
+    if(it->r_it != NULL)
+        free(it);
+    else
+        item_remove(c->item);       /* release the c->item reference */
     c->item = 0;
 }
 
@@ -1834,18 +1843,41 @@ static void process_bin_get_or_touch(conn *c) {
         it = item_get(key, nkey, c, DO_UPDATE);
     }
 
+    bool remote_alloc = false;
+    remote_item* remote_it = NULL;
     if(!it) {   // It missed the local queue, check the remote items before reporting a miss
 
-        remote_item* remote_it = slabs_rdma_lookup(key, nkey);
+        remote_it = slabs_remoteq_lookup(key, nkey);
+
         if(remote_it){
-            printf("item found remote !\n");
-            it = get_remote_item(remote_it);     // Maybe we can skip retriving the actual item to reduce overhead. Report a hit and move on!
+            //c->thread->stats.slab_stats[remote_it->slabs_clsid].remoteq_hits++;
+            //c->thread->stats.slab_stats[remote_it->slabs_clsid].q_misses++;
+            slabclass_t *p = (slabclass_t *) get_slabclass(remote_it->slabs_clsid);
+            pthread_mutex_lock(&rdma_local_region_lock);
+            it = (item *) get_remote_item(remote_it);   // Maybe we can skip retriving the actual item to reduce overhead. Report a hit and move on!
+            //int counter = 0;
+            // while(it->nbytes == 0){
+            //     nanosleep(&((struct timespec){0,1}), &((struct timespec){0,0}));
+            //     //counter++;
+            //     //printf("remote item nbyte is :%d , ",remote_it->nbytes);
+            //  }
+            //printf("Counter: %d\n", counter);
             
+            // if(it->nbytes != 0){
+            //     printf("remote item retrieval successful, retrived: item data: %s, size: %d \n", ITEM_data(it), it->nbytes);//key: %s, nkey:%d, goal: %s, nkey: %d.\n", ITEM_key(it), it->nkey, remote_it->key, remote_it->nkey); 
+            // }
+            // else{
+            //     printf("remote item retrieval failed.\n");
+            //     it = NULL;
+            // }
+            remote_alloc = true;
         }
     }
 
 
     if (it) {
+        //  if(remote_alloc)
+        //     printf("item data[0]: %c\n", *ITEM_data(it));
         /* the length has two unnecessary bytes ("\r\n") */
         uint16_t keylen = 0;
         uint32_t bodylen = sizeof(rsp->message.body) + (it->nbytes - 2);
@@ -1894,19 +1926,18 @@ static void process_bin_get_or_touch(conn *c) {
         if (should_return_value) {
             /* Add the data minus the CRLF */
             if ((it->it_flags & ITEM_CHUNKED) == 0) {
+                if(remote_alloc && it->nbytes == 0)
+                    printf("Value Size is ZERO. WHY????\n");
                 add_iov(c, ITEM_data(it), it->nbytes - 2);
             } else {
                 add_chunked_item_iovs(c, it, it->nbytes - 2);
             }
         }
-
         conn_set_state(c, conn_mwrite);
         c->write_and_go = conn_new_cmd;
         /* Remember this command so we can garbage collect it later */
+        //if(!remote_alloc)
         c->item = it;
-        if(it->r_it)
-            set_remote_item(it);    // send the item over to the remote host to conserve the changes made during the GET command
-
     } else {
         pthread_mutex_lock(&c->thread->stats.mutex);
         if (should_touch) {
@@ -1948,6 +1979,9 @@ static void process_bin_get_or_touch(conn *c) {
         }
     }
 
+    if(remote_alloc)
+            pthread_mutex_unlock(&rdma_local_region_lock);
+            
     if (settings.detail_enabled) {
         stats_prefix_record_get(key, nkey, NULL != it);
     }
@@ -2157,7 +2191,7 @@ static void bin_read_key(conn *c, enum bin_substates next_substate, int extra) {
                     fprintf(stderr, "%d: Failed to grow buffer.. closing connection\n",
                             c->sfd);
                 }
-                conn_set_state(c, conn_closing);
+                conn_set_state(c, conn_closing);printf("-------------HERE 2\n");
                 return;
             }
 
@@ -2188,6 +2222,7 @@ static void handle_binary_protocol_error(conn *c) {
                 c->binary_header.request.opcode, c->sfd);
     }
     c->write_and_go = conn_closing;
+    printf("HHHHHHERE 1\n");
 }
 
 static void init_sasl_conn(conn *c) {
@@ -2405,12 +2440,16 @@ static void dispatch_bin_command(conn *c) {
     if (keylen > bodylen || keylen + extlen > bodylen) {
         write_bin_error(c, PROTOCOL_BINARY_RESPONSE_UNKNOWN_COMMAND, NULL, 0);
         c->write_and_go = conn_closing;
+            printf("HHHHHHERE 2\n");
+
         return;
     }
 
     if (settings.sasl && !authenticated(c)) {
         write_bin_error(c, PROTOCOL_BINARY_RESPONSE_AUTH_ERROR, NULL, 0);
         c->write_and_go = conn_closing;
+            printf("HHHHHHERE 3\n");
+
         return;
     }
 
@@ -2546,7 +2585,7 @@ static void dispatch_bin_command(conn *c) {
                 write_bin_response(c, NULL, 0, 0, 0);
                 c->write_and_go = conn_closing;
                 if (c->noreply) {
-                    conn_set_state(c, conn_closing);
+                    conn_set_state(c, conn_closing);printf("-------------HERE 3\n");
                 }
             } else {
                 protocol_error = 1;
@@ -2629,6 +2668,9 @@ static void process_bin_update(conn *c) {
     it = item_alloc(key, nkey, req->message.body.flags,
             realtime(req->message.body.expiration), vlen+2);
 
+    // if(it == -1)
+    //     return;
+        
     if (it == 0) {
         enum store_item_type status;
         if (! item_size_ok(nkey, req->message.body.flags, vlen + 2)) {
@@ -3651,10 +3693,13 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
 
             if(!it) {   // It missed the local queue, check the remote items before reporting a miss
 
-                remote_item* remote_it = slabs_rdma_lookup(key, nkey);
+                remote_item* remote_it = slabs_remoteq_lookup(key, nkey);
+
                 if(remote_it){
+                    //c->thread->stats.slab_stats[remote_it->slabs_clsid].remoteq_hits++;
+                    //c->thread->stats.slab_stats[remote_it->slabs_clsid].q_misses++;
                     printf("item is remote !\n");
-                    it = get_remote_item(remote_it);     // Maybe we can skip retriving the actual item to reduce overhead. Report a hit and move on!
+                    //it = get_remote_item(remote_it);     // Maybe we can skip retriving the actual item to reduce overhead. Report a hit and move on!
                 }
             }
 
@@ -3775,9 +3820,6 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
                 incr_slab_hits(ITEM_clsid(it),it->page_id);
                 *(c->ilist + i) = it;
                 i++;
-                if(it->r_it)
-                    set_remote_item(it);    // send the item over to the remote host to conserve the changes made during the GET command
-
             } else {
                 pthread_mutex_lock(&c->thread->stats.mutex);
                 c->thread->stats.get_misses++;
@@ -4469,12 +4511,12 @@ static void process_command(conn *c, char *command) {
 
     } else if (ntokens == 2 && (strcmp(tokens[COMMAND_TOKEN].value, "quit") == 0)) {
 
-        conn_set_state(c, conn_closing);
+        conn_set_state(c, conn_closing);printf("-------------HERE 4\n");
 
     } else if (ntokens == 2 && (strcmp(tokens[COMMAND_TOKEN].value, "shutdown") == 0)) {
 
         if (settings.shutdown_command) {
-            conn_set_state(c, conn_closing);
+            conn_set_state(c, conn_closing);printf("-------------HERE 5\n");
             raise(SIGINT);
         } else {
             out_string(c, "ERROR: shutdown not enabled");
@@ -4701,7 +4743,7 @@ static int try_read_command(conn *c) {
                     fprintf(stderr, "Invalid magic:  %x\n",
                             c->binary_header.request.magic);
                 }
-                conn_set_state(c, conn_closing);
+                conn_set_state(c, conn_closing);printf("-------------HERE 6\n");
                 return -1;
             }
 
@@ -4746,7 +4788,7 @@ static int try_read_command(conn *c) {
                 if (ptr - c->rcurr > 100 ||
                     (strncmp(ptr, "get ", 4) && strncmp(ptr, "gets ", 5))) {
 
-                    conn_set_state(c, conn_closing);
+                    conn_set_state(c, conn_closing);printf("-------------HERE 7\n");
                     return 1;
                 }
             }
@@ -4852,6 +4894,8 @@ static enum try_read_result try_read_network(conn *c) {
                 c->rbytes = 0; /* ignore what we read */
                 out_of_memory(c, "SERVER_ERROR out of memory reading request");
                 c->write_and_go = conn_closing;
+                    printf("HHHHHHERE 4\n");
+
                 return READ_MEMORY_ERROR;
             }
             c->rcurr = c->rbuf = new_rbuf;
@@ -4989,7 +5033,7 @@ static enum transmit_result transmit(conn *c) {
             if (!update_event(c, EV_WRITE | EV_PERSIST)) {
                 if (settings.verbose > 0)
                     fprintf(stderr, "Couldn't update event\n");
-                conn_set_state(c, conn_closing);
+                conn_set_state(c, conn_closing);printf("-------------HERE 8\n");
                 return TRANSMIT_HARD_ERROR;
             }
             return TRANSMIT_SOFT_ERROR;
@@ -5002,7 +5046,7 @@ static enum transmit_result transmit(conn *c) {
         if (IS_UDP(c->transport))
             conn_set_state(c, conn_read);
         else
-            conn_set_state(c, conn_closing);
+            conn_set_state(c, conn_closing);printf("-------------HERE 9\n");
         return TRANSMIT_HARD_ERROR;
     } else {
         return TRANSMIT_COMPLETE;
@@ -5171,7 +5215,7 @@ static void drive_machine(conn *c) {
             if (!update_event(c, EV_READ | EV_PERSIST)) {
                 if (settings.verbose > 0)
                     fprintf(stderr, "Couldn't update event\n");
-                conn_set_state(c, conn_closing);
+                conn_set_state(c, conn_closing);printf("-------------HERE 10\n");
                 break;
             }
 
@@ -5190,7 +5234,7 @@ static void drive_machine(conn *c) {
                 conn_set_state(c, conn_parse_cmd);
                 break;
             case READ_ERROR:
-                conn_set_state(c, conn_closing);
+                conn_set_state(c, conn_closing);printf("-------------HERE 11\n");
                 break;
             case READ_MEMORY_ERROR: /* Failed to allocate more memory */
                 /* State already set by try_read_network */
@@ -5227,7 +5271,7 @@ static void drive_machine(conn *c) {
                     if (!update_event(c, EV_WRITE | EV_PERSIST)) {
                         if (settings.verbose > 0)
                             fprintf(stderr, "Couldn't update event\n");
-                        conn_set_state(c, conn_closing);
+                        conn_set_state(c, conn_closing);printf("-------------HERE 12\n");
                         break;
                     }
                 }
@@ -5246,7 +5290,7 @@ static void drive_machine(conn *c) {
                 if (settings.verbose) {
                     fprintf(stderr, "Invalid rlbytes to read: len %d\n", c->rlbytes);
                 }
-                conn_set_state(c, conn_closing);
+                conn_set_state(c, conn_closing);printf("-------------HERE 13\n");
                 break;
             }
 
@@ -5286,7 +5330,7 @@ static void drive_machine(conn *c) {
             }
 
             if (res == 0) { /* end of stream */
-                conn_set_state(c, conn_closing);
+                conn_set_state(c, conn_closing);printf("-------------HERE 14\n");
                 break;
             }
 
@@ -5294,7 +5338,7 @@ static void drive_machine(conn *c) {
                 if (!update_event(c, EV_READ | EV_PERSIST)) {
                     if (settings.verbose > 0)
                         fprintf(stderr, "Couldn't update event\n");
-                    conn_set_state(c, conn_closing);
+                    conn_set_state(c, conn_closing);printf("-------------HERE 15\n");
                     break;
                 }
                 stop = true;
@@ -5317,7 +5361,7 @@ static void drive_machine(conn *c) {
                         (long)c->rcurr, (long)c->ritem, (long)c->rbuf,
                         (int)c->rlbytes, (int)c->rsize);
             }
-            conn_set_state(c, conn_closing);
+            conn_set_state(c, conn_closing);printf("-------------HERE 16\n");
             break;
 
         case conn_swallow:
@@ -5346,14 +5390,14 @@ static void drive_machine(conn *c) {
                 break;
             }
             if (res == 0) { /* end of stream */
-                conn_set_state(c, conn_closing);
+                conn_set_state(c, conn_closing);printf("-------------HERE 17\n");
                 break;
             }
             if (res == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
                 if (!update_event(c, EV_READ | EV_PERSIST)) {
                     if (settings.verbose > 0)
                         fprintf(stderr, "Couldn't update event\n");
-                    conn_set_state(c, conn_closing);
+                    conn_set_state(c, conn_closing);printf("-------------HERE 18\n");
                     break;
                 }
                 stop = true;
@@ -5362,7 +5406,7 @@ static void drive_machine(conn *c) {
             /* otherwise we have a real error, on which we close the connection */
             if (settings.verbose > 0)
                 fprintf(stderr, "Failed to read, and not due to blocking\n");
-            conn_set_state(c, conn_closing);
+            conn_set_state(c, conn_closing);printf("-------------HERE 19\n");
             break;
 
         case conn_write:
@@ -5375,7 +5419,7 @@ static void drive_machine(conn *c) {
                 if (add_iov(c, c->wcurr, c->wbytes) != 0) {
                     if (settings.verbose > 0)
                         fprintf(stderr, "Couldn't build response\n");
-                    conn_set_state(c, conn_closing);
+                    conn_set_state(c, conn_closing);printf("-------------HERE 20\n");
                     break;
                 }
             }
@@ -5386,7 +5430,7 @@ static void drive_machine(conn *c) {
           if (IS_UDP(c->transport) && c->msgcurr == 0 && build_udp_headers(c) != 0) {
             if (settings.verbose > 0)
               fprintf(stderr, "Failed to build UDP headers\n");
-            conn_set_state(c, conn_closing);
+            conn_set_state(c, conn_closing);printf("-------------HERE 21\n");
             break;
           }
             switch (transmit(c)) {
@@ -5408,7 +5452,7 @@ static void drive_machine(conn *c) {
                 } else {
                     if (settings.verbose > 0)
                         fprintf(stderr, "Unexpected state %d\n", c->state);
-                    conn_set_state(c, conn_closing);
+                    conn_set_state(c, conn_closing);printf("-------------HERE 22\n");
                 }
                 break;
 
@@ -6954,7 +6998,7 @@ int main (int argc, char **argv) {
     stats_init();
     assoc_init(settings.hashpower_init);
     shadow_assoc_init(settings.hashpower_init);
-    rdma_assoc_init(settings.hashpower_init);
+    remote_assoc_init(settings.hashpower_init);
     conn_init();
     slabs_init(settings.maxbytes, settings.factor, preallocate,
             use_slab_sizes ? slab_sizes : NULL, settings.isGreedy);

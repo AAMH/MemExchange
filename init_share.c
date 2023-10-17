@@ -108,7 +108,7 @@ void receive_msg(){
     if(m < 0){
         if(errno == EAGAIN || errno == EWOULDBLOCK){ 
             //reset_remote_spare();
-            fprintf(stderr, "No outstanding requests.\n");
+            //fprintf(stderr, "No outstanding requests.\n");
             return;
         }
     }
@@ -184,7 +184,7 @@ void *receiver_routine(){
     while(1){
         sleep(1); 
         // printf("\033[2J\033[1;1H");
-        printf("---Waiting for a message...\n");
+        //printf("---Waiting for a message...\n");
         receive_msg();
     }
 

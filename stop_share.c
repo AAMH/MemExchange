@@ -7,6 +7,7 @@
 #include <fcntl.h>      /* O_flags */
 #include <stdio.h>
 #include <stdlib.h>
+#include <semaphore.h>
 
 #define n 15
 
@@ -24,7 +25,7 @@ int main () {
         slab_name[0] = '\n';
 
         sprintf(semaph_name,"/semaph%d",i);
-        shm_unlink(semaph_name);
+        sem_unlink(semaph_name);
         semaph_name[0] = '\n';
     }
 }

@@ -28,38 +28,6 @@ typedef struct _shadow_item_t {
     struct timeval         last_seen_time;
 } shadow_item;
 
-typedef struct {
-    unsigned int size;      /* sizes of items */
-    unsigned int perslab;   /* how many items per slab */
-
-    void *slots;           /* list of item ptrs */
-    unsigned int sl_curr;   /* total free items in list */
-
-    unsigned int slabs;     /* how many slabs were allocated for this class */
-
-    void **slab_list;       /* array of slab pointers */
-    unsigned int list_size; /* size of prev array */
-
-    size_t requested; /* The number of requested bytes */
-
-    uint32_t hits[4000];
-
-/*** Remote memory access Additions ***/
-    uint32_t *rkey;
-    struct connection **conn;
-    void *rslots;
-    
-/*** shadow queue Additions ***/
-    shadow_item *shadowq_head;
-    shadow_item *shadowq_tail;
-    unsigned int shadowq_size;
-    uint32_t shadowq_max_items;
-    uint32_t shadowq_hits[4000];
-    uint32_t q_misses;
-
-    tree_t *tree;
-
-} slabclass_t;
 
 static pthread_mutex_t shadow_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t tree_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -72,6 +40,7 @@ void remove_shadowq_item(shadow_item *elem, node_t * node);
 void evict_shadowq_item(shadow_item *shadowq_it);
 
 tree_t *new_tree();
+node_t *new_tree_node(struct timeval key);
 node_t *search_tree(node_t *root, struct timeval key);
 void insert_tree_node(tree_t *t, node_t *n);
 void delete_tree_node(tree_t *t, node_t *z);

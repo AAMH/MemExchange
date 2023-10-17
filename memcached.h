@@ -4,6 +4,8 @@
  * The main memcached header holding commonly used data
  * structures and function prototypes.
  */
+#ifndef MEMCACHED_H
+#define MEMCACHED_H
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
@@ -22,8 +24,8 @@
 #include "itoa_ljust.h"
 #include "protocol_binary.h"
 #include "cache.h"
+#include "logger.h"
 #include "shadow_assoc.h"
-#include "rdma_util.h"
 
 #include "sasl_defs.h"
 
@@ -403,6 +405,51 @@ extern struct settings settings;
 #define ITEM_CHUNKED 32
 #define ITEM_CHUNK 64
 
+typedef struct _remitem {
+    struct _remitem * next;
+    struct _remitem * prev;
+    struct _remitem * h_next;      /* hash chain next */
+    
+    int               nbytes;   
+    char            * key;        /* item key*/
+    uint8_t           nkey;       /* key length, w/terminating null and padding */
+    uint8_t           slabs_clsid;
+    uint16_t          page_id;    /* page id owning this item */
+
+    void            * address;     /* remote address of the item */
+    uint32_t          rkey;        /* RKEY */
+} remote_item;
+
+/**
+ * Structure for storing items within memcached.
+ */
+typedef struct _stritem {
+    /* Protected by LRU locks */
+    struct _stritem *next;
+    struct _stritem *prev;
+    /* Rest are protected by an item lock */
+    struct _stritem *h_next;    /* hash chain next */
+    rel_time_t      time;       /* least recent access */
+    rel_time_t      exptime;    /* expire time */
+    int             nbytes;     /* size of data */
+    unsigned short  refcount;
+    uint8_t         nsuffix;    /* length of flags-and-length string */
+    uint8_t         it_flags;   /* ITEM_* above */
+    uint8_t         slabs_clsid;/* which slab class we're in */
+    uint8_t         nkey;       /* key length, w/terminating null and padding */
+    uint16_t        page_id;    /* indicating the ID of the page containing this item */
+    remote_item *   r_it;       /* remote item reference (if any)*/
+    /* this odd type prevents type-punning issues when we do
+     * the little shuffle to save space when not using CAS. */
+    union {
+        uint64_t cas;
+        char end;
+    } data[];
+    /* if it_flags & ITEM_CAS we have 8 bytes CAS */
+    /* then null-terminated key */
+    /* then " flags length\r\n" (no terminating null) */
+    /* then data with terminating \r\n (no terminating null; it's binary!) */
+} item;
 // TODO: If we eventually want user loaded modules, we can't use an enum :(
 enum crawler_run_type {
     CRAWLER_EXPIRED=0, CRAWLER_METADUMP
@@ -571,6 +618,40 @@ struct slab_rebalance {
     uint8_t done;
 };
 
+typedef struct {
+    unsigned int size;      /* sizes of items */
+    unsigned int perslab;   /* how many items per slab */
+
+    void *slots;           /* list of item ptrs */
+    unsigned int sl_curr;   /* total free items in list */
+
+    unsigned int slabs;     /* how many slabs were allocated for this class */
+
+    void **slab_list;       /* array of slab pointers */
+    unsigned int list_size; /* size of prev array */
+
+    size_t requested; /* The number of requested bytes */
+
+    uint32_t hits[4000];
+
+/*** Remote memory access Additions ***/
+    struct connection **conn;
+    uint32_t *rkey;
+    unsigned int sl_curr_r;   /* total free remote items in list */
+    void *rslots;
+    
+/*** shadow queue Additions ***/
+    shadow_item *shadowq_head;
+    shadow_item *shadowq_tail;
+    unsigned int shadowq_size;
+    uint32_t shadowq_max_items;
+    uint32_t shadowq_hits[4000];
+    uint32_t q_misses;
+
+    tree_t *tree;
+
+} slabclass_t;
+
 extern struct slab_rebalance slab_rebal;
 
 /*
@@ -597,6 +678,7 @@ extern int daemonize(int nochdir, int noclose);
 #include "trace.h"
 #include "hash.h"
 #include "util.h"
+#include "rdma_util.h"
 
 /*
  * Functions such as the libevent-related calls that need to do cross-thread
@@ -663,3 +745,4 @@ extern void drop_privileges(void);
 
 #define likely(x)       __builtin_expect((x),1)
 #define unlikely(x)     __builtin_expect((x),0)
+#endif

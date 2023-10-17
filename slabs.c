@@ -75,6 +75,7 @@ struct rdma_cm_id *rdma_connections_head = NULL;
 const int MAX_CONNECTIONS_ALLOWED = 10;  // Maximum number of concurent RDMA connections
 const int TIMEOUT_IN_MS = 500;
 void * remote_region = NULL;
+bool item_read = false;
 
 static int on_connect_request(struct rdma_cm_id *id);
 static int on_addr_resolved(struct rdma_cm_id *id);
@@ -251,26 +252,23 @@ static void split_slab_page_into_freelist(char *ptr, const unsigned int id, size
     }
 }
 
-static void split_remote_page_into_freelist(char *rptr, char *lptr, const unsigned int id, size_t sizee) {
+static void split_remote_page_into_freelist(char *rptr, const unsigned int id, size_t sizee) {
     slabclass_t *p = &slabclass[id];
     int x;
     int i = sizee / p->size;
     for (x = 0; x < i; x++) {
-        do_slabs_free_remote(lptr, 0, id);
-        lptr += p->size;
+        //do_slabs_free_remote(lptr, 0, id);
+        remote_item * r_it = create_remote_item(id);
 
-        remote_item *r_item = malloc(sizeof(struct _remitem));
-        r_item->address = rptr;
-        // uint32_t hv = hash(&r_item->address, sizeof(void*));
-        // rdma_assoc_insert(r_item, hv);
-
-        r_item->next = p->rslots;
-        if (r_item->next) r_item->next->prev = r_item;
-        p->rslots = r_item;
-        r_item->page_id = p->slabs-1;
-        r_item->slabs_clsid = id;
+        r_it->address = rptr;
+        r_it->next = p->rslots;
+        if (r_it->next) r_it->next->prev = r_it;
+        p->rslots = r_it;
+        r_it->page_id = p->slabs-1;
+        r_it->slabs_clsid = id;
 
         rptr += p->size;
+        p->sl_curr_r++;
     }
 }
 
@@ -302,7 +300,7 @@ static int do_slabs_newslab(const unsigned int id) {
         printf("free mem(this): %lu\n", mem_avail);  
     }
 
-    if ((mem_limit && mem_malloced + len > mem_limit && p->slabs > 0
+    if ((mem_limit && mem_malloced + mem_malloced_remote + len > mem_limit && p->slabs > 0
         && g->slabs == 0)) {
             mem_limit_reached = true;
             MEMCACHED_SLABS_SLABCLASS_ALLOCATE_FAILED(id);
@@ -343,7 +341,7 @@ static void *do_slabs_alloc(const size_t size, unsigned int id, uint64_t *total_
         return NULL;
     }
     p = &slabclass[id];
-    assert(p->sl_curr == 0 || ((item *)p->slots)->slabs_clsid == 0);
+    assert(p->sl_curr == 0 || ((item *)p->slots)->slabs_clsid == 0 /*|| ((item *)((remote_item *)p->rslots)->temp_addr)->slabs_clsid == 0*/);
     if (total_bytes != NULL) {
         *total_bytes = p->requested;
     }
@@ -354,36 +352,18 @@ static void *do_slabs_alloc(const size_t size, unsigned int id, uint64_t *total_
     if (p->sl_curr == 0 && flags != SLABS_ALLOC_NO_NEWPAGE) {
         do_slabs_newslab(id);
     }
-
-    if (p->sl_curr != 0) {      /* We have free slots, either local or remote*/
+        
+    if (p->sl_curr != 0) {
         /* return off our freelist */
         it = (item *)p->slots;
-        if(it) {
-            p->slots = it->next;
-            if (it->next) it->next->prev = 0;
-            it->r_it = NULL;
-        }
-        else {          /* No available local slot, check the remote slots*/
-            remote_item * r_it = (remote_item *) p->rslots; // should NOT be empty, since sl_curr was not zero.
-            p->rslots = r_it->next;
-            if (r_it->next) r_it->next->prev = 0;
-
-            // printf("pageid: %d\n", r_it->page_id);
-            // printf("conn: %p\n", p->conn[r_it->page_id]);
-            // printf("local region:%p\n", p->conn[r_it->page_id]->rdma_local_region);
-
-            it = p->conn[r_it->page_id]->rdma_local_region;  //malloc(sizeof(struct _stritem));
-            memset(it, 0, sizeof(struct _stritem));
-            it->r_it = r_it;
-            it->slabs_clsid = id;
-            //printf("Using a remote item. class: %d \n", it->slabs_clsid);
-        }
+        p->slots = it->next;
+        if (it->next) it->next->prev = 0;
         /* Kill flag and initialize refcount here for lock safety in slab
             * mover's freeness detection. */
-            it->it_flags &= ~ITEM_SLABBED;
-            it->refcount = 1;
-            p->sl_curr--;
-            ret = (void *)it;
+        it->it_flags &= ~ITEM_SLABBED;
+        it->refcount = 1;
+        p->sl_curr--;
+        ret = (void *)it;
     } else {
         ret = NULL;
     }
@@ -538,7 +518,7 @@ static void do_slabs_free_remote(char *lptr, const size_t size, unsigned int id)
     it = (item *)lptr;
     if ((it->it_flags & ITEM_CHUNKED) == 0) {
         it->it_flags = ITEM_SLABBED;
-        it->slabs_clsid = id;
+        it->slabs_clsid = 0;
         it->prev = 0;
         it->page_id = p->slabs-1; 
 
@@ -1284,15 +1264,16 @@ static void slab_rebalance_finish(void) {
              } 
 
             struct connection *conn = trck.latest_conn;
-            memset(conn->rdma_local_region, 0, si);   
+            //memset(conn->rdma_local_region, 0, si);   
 
             d_cls->slab_list[d_cls->slabs++] = conn->peer_mr.addr;
             d_cls->rkey[d_cls->slabs-1] = conn->peer_mr.rkey;
             d_cls->conn[d_cls->slabs-1] = conn;
             printf("  Memory address: %p,  rkey: %d, ip: %p\n",conn->peer_mr.addr, conn->peer_mr.rkey, rdma_get_peer_addr(conn->id)); 
-            int temp = d_cls->sl_curr;
-            split_remote_page_into_freelist(d_cls->slab_list[d_cls->slabs-1], conn->rdma_local_region, slab_rebal.d_clsid, si);
-            printf("%d items added\n",d_cls->sl_curr - temp);
+            int temp = d_cls->sl_curr_r;
+            //d_cls->sl_curr_r += d_cls->perslab;
+            split_remote_page_into_freelist(d_cls->slab_list[d_cls->slabs-1], slab_rebal.d_clsid, si);
+            printf("%d remote items added\n",d_cls->sl_curr_r - temp);
 
         }
         else{   
