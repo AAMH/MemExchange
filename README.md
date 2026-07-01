@@ -1,60 +1,219 @@
-# Memcached with Shared Memory 
+# MemExchange
 
-For the original implementation of memcached, please refer the the github link below:
-https://github.com/memcached/memcached <br/><br/>
-Hillclimbing implementation is derived from Cllifhanger's github:<br/>
-https://github.com/assafein/memcached_hillclimbing
+> **Cluster-wide memory management for multi-tenant cloud caching using RDMA.**
 
-## Dependencies
-* libevent, http://www.monkey.org/~provos/libevent/ (libevent-dev)
-* librt, in order to allow the use of POSIX shared memory
-* automake, autotools-dev, and autoconf
+MemExchange is a distributed memory management system that enables **cluster-wide memory trading** between Memcached tenants. Instead of treating memory as a resource confined to individual servers, MemExchange dynamically reallocates idle memory across physical machines, allowing memory-constrained tenants to transparently utilize spare capacity elsewhere in the cluster.
 
-## Changes and Motivation
-Implemented a new mechanism that allocates from a shared pool of memory reserved only for memcached instances. This allows for a global view of memcached information and allows for future optimizations and more efficient slab allocation algorithms.
-Currently, if instances are run using -G (greedy) they will request to take memory as much as they can, ignoring the memory limit set for them when starting instances.
+To enable efficient remote accesses, MemExchange introduces the **MemExchange Tracker Communication (MTC)** protocol, an application-layer mechanism that coordinates memory reallocation and enables one-sided RDMA operations without involving remote CPUs. By operating directly at the cache layer, MemExchange avoids the page faults and kernel overhead associated with operating-system-level remote memory systems while remaining compatible with existing Memcached deployments.
 
-## How to run Memcached
-* ./autogen.sh 
-* ./configure (Edit the LIBS in generated makefile to include -lrt and add -w to CFLAGS)
-* make
-* Compile init_share and stop_share (i.e. gcc -o init_share init_share.c -lrt -pthread).
-* Run ./init_share XXXX (MB) with the total amount of shared memory you need (i.e. ./init_share 10000).
-* Run memcached instances (i.e. ./memcached -p 11212 -t 4 -m 4096 -n 550 -G).<br />
-  Option G indicates the greedy approach of memory allocation, if not specified, instances will get memory equal to the limit set with -m.
-* Once finished run ./stop_share to unlink the shared memory segment.
+MemExchange was developed as part of my PhD research on distributed memory management for cloud-scale in-memory caching systems.
 
-## Benchmark
-For benchmarking, the data caching package provided in [Cloudsuite](http://cloudsuite.ch///pages/benchmarks/datacaching/) can be used. You have to have docker installed on your system. 
-* Pull the client image from the docker hub (i.e. docker pull aamh/data-caching:client)
+---
+
+## Highlights
+
+- RDMA-backed remote memory access
+- Cluster-wide memory trading across physical servers
+- Dynamic memory allocation using online Miss Ratio Curve (MRC) estimation
+- Marginal-utility-based memory redistribution
+- MemExchange Tracker Communication (MTC) protocol
+- Object-level remote memory management
+- Integration with Memcached
+- Automated experiment and benchmarking framework
+- Large-scale evaluation on CloudLab
+
+---
+
+## Motivation
+
+Cloud providers typically provision memory based on **peak demand**, causing significant amounts of memory to remain idle across clusters while other tenants simultaneously experience memory pressure.
+
+Traditional cache memory management is limited to a single physical machine. MemExchange extends memory management across the cluster by allowing tenants to dynamically borrow unused memory from remote servers through low-latency RDMA communication.
+
+The result is a logical cluster-wide memory pool that improves overall memory utilization while reducing cache misses for memory-constrained tenants.
+
+---
+
+## Key Contributions
+
+MemExchange introduces several ideas:
+
+- **Cluster-wide Memory Trading (MTC)** that dynamically reallocates memory between physical servers.
+- **Application-layer remote memory management**, avoiding kernel swap paths and page faults.
+- **Marginal-utility-based allocation** using online Miss Ratio Curve estimation.
+- **Efficient one-sided RDMA communication** for remote object accesses.
+- **Large-scale implementation and evaluation** integrated directly into Memcached.
+
+---
+
+## System Overview
+
+At a high level, MemExchange consists of four major components:
+
+- **Memcached tenants** that serve cache requests.
+- **Tracker**, which coordinates local and cluster-wide memory trading.
+- **RDMA communication layer** enabling low-latency remote memory accesses.
+- **Memory Trading Controller (MTC)** responsible for dynamically redistributing memory according to tenant demand.
+
+> **Architecture diagram coming soon**
+
+---
+
+## Repository Structure
+
 ```
-docker run -it --name dc-client --network="host" aamh/data-caching:client bash
-cd usr/src/memcached/Cloudsuite-Client/memcached_client/
-vim docker_servers.txt 
-```
-* Edit this file to look like this:<br />
-  127.0.0.1, 11212, 1<br />
-  127.0.0.1, 11213, 2<br />
-  ....<br />
-  
-  This file should contain one line for each memcached instances you want to test.<br/> First column is the IP address (127.0.0.1 is the localhost in the client container).<br/> Second column specifies the port the server is listening to.<br/> Third column specifies the reverse ratio of number of request sent to the instance (1 means full speed, 2 means half,..).
-* To scale the dataset and warm up the servers:
-```
-./loader -a ../twitter_dataset/twitter_dataset_unscaled -o ../twitter_dataset/twitter_dataset_30x -s docker_servers.txt -w 4 -S 30 -D 6000 -j -T 1 -r 400000
-```
-* If dataset is already scaled, warm up the servers:
-```
-./loader -a ../twitter_dataset/twitter_dataset_30x -s docker_servers.txt -w 4 -S 1 -D 6000 -j -T 1 -r 400000
-```
-* Run the benchmark: 
-```
-./loader -a ../twitter_dataset/twitter_dataset_30x -s docker_servers.txt -g 0.8 -T 1 -c 200 -w 8 -r 400000
+MemExchange/
+├── src/                 # MemExchange implementation
+├── tracker/             # Tracker source code
+├── docs/                # Documentation
+├── scripts/             # Automation and experiment scripts
+├── analysis/            # R scripts and figure generation
+├── benchmarks/          # Benchmark documentation
+└── ...
 ```
 
-For the full description of arguments and a more comprehensive guide, please refer to the Cloudsuite documentation.
+---
 
+## Building
 
-## Contributing
+### Install dependencies
 
-See https://github.com/memcached/memcached/wiki/DevelopmentRepos
+```bash
+sudo apt update
 
+sudo apt install -y \
+    autotools-dev \
+    autoconf \
+    libevent-dev \
+    librdmacm-dev \
+    ibverbs-utils \
+    scons \
+    gengetopt \
+    screen
+
+# Required for Soft-RoCE (RXE)
+sudo apt install rdma-core
+```
+
+### Compile MemExchange
+
+```bash
+./autogen
+./configure CFLAGS="-w"
+make
+```
+
+To clean the build:
+
+```bash
+make clean
+```
+
+---
+
+## Running MemExchange
+
+### Compile the Tracker
+
+```bash
+gcc -g -o tracker start_tracker.c shm_malloc.c -lrt -pthread
+
+gcc -g -o stop_tracker stop_tracker.c shm_malloc.c -lrt -pthread
+```
+
+### Start the Tracker
+
+Example:
+
+```bash
+./tracker 32000 0.25 0.25 0.25 0.25 MTC_ON
+```
+
+Arguments:
+
+```
+tracker <memory_MB> [tenant_share ...] <MTC_ON|MTC_OFF>
+```
+
+When **MTC_ON** is enabled:
+
+- tenants may utilize remote memory
+- idle memory may be lent to remote servers
+- cluster-wide memory trading is enabled
+
+When **MTC_OFF**:
+
+- memory trading is limited to local tenants only
+- no remote memory participation occurs
+
+---
+
+### Run MemExchange
+
+Example:
+
+```bash
+./memcached -v -p 11212 -t 4 -m 4096 -G
+```
+
+The `-G` flag enables **Greedy Mode**, allowing tenants to grow beyond their initial memory allocation when additional cluster memory becomes available through MemExchange.
+
+---
+
+## Benchmarking
+
+MemExchange was evaluated using:
+
+- CloudSuite
+- mutilate
+
+Modified versions used in the evaluation are available in separate repositories.
+
+See **benchmarks/README.md** for setup instructions.
+
+---
+
+## Documentation
+
+Additional documentation is available under `docs/`.
+
+- Architecture
+- Memory Trading Controller (MTC)
+- Benchmarking
+- Reproducing the paper
+- Software RDMA (RXE)
+- Frequently Asked Questions
+
+---
+
+## Experimental Results
+
+Evaluated on CloudLab deployments ranging from microbenchmarks to clusters of **100 servers**.
+
+Highlights include:
+
+- Up to **2.3×** lower remote-memory overhead compared to TCP-based designs.
+- Up to **13%** higher cluster-wide memory utilization.
+- Up to **63%** reduction in cache miss rate for memory-constrained tenants.
+
+See the paper for complete evaluation details.
+
+---
+
+## Publications
+
+**MemExchange: Cloud-Scale Memory Trading**
+
+```
+@article{...}
+```
+
+(arXiv link coming soon)
+
+---
+
+## License
+
+This repository is released for research and educational purposes.
+
+See `LICENSE` for details.
