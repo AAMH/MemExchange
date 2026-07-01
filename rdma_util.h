@@ -1,12 +1,6 @@
 #ifndef RDMA_UTIL_H
 #define RDMA_UTIL_H
 
-#include <netdb.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <stdbool.h>
 #include <rdma/rdma_cma.h>
 
 #include "shm_malloc.h"
@@ -14,6 +8,14 @@
 
 #define TEST_NZ(x) do { if ( (x)) printf("error: " #x " failed (returned non-zero)." ); } while (0)
 #define TEST_Z(x)  do { if (!(x)) printf("error: " #x " failed (returned zero/null)."); } while (0)
+
+enum rts{
+    TRY_TO_BROADCAST,
+    BROADCASTING,
+    BROADCASTING_FAILED,
+    PAGE_TRANSFER_IN_PROGRESS,
+    DONE
+    };
 
 struct message {
     enum {
@@ -40,6 +42,7 @@ struct connection {
     struct rdma_cm_id *id;
     struct ibv_qp *qp;
 
+    int peer_identifier;
     int connected;
 
     struct ibv_mr *recv_mr;
@@ -73,29 +76,29 @@ struct connection {
     } recv_state;
 
     pthread_t cm_poller_thread;
+
+    struct context *s_ctx;
+
+    char * last_used_addr;
+    bool should_stop_polling; 
+
 };
 
+static size_t prevsize = 0;
+static enum rts rdma_transfer_state = DONE;
 static const int RDMA_BUFFER_SIZE = 1024 * 1024;
-static bool should_stop_polling = false;
-static struct context *s_ctx = NULL;
 
-extern void * remote_region;
+extern void * remote_region; // pointer to the address being allocated to remote tenant
 extern struct rdma_cm_id *rdma_connections_head;
-static pthread_mutex_t rdma_local_region_lock;
-static pthread_mutex_t rdma_local_region_lock2;
-static char * last_used_addr = NULL;
 
-static int batch_size = 10;
-static int curr_wr_sge = 0;
-static struct ibv_sge * sge_send = NULL;
-static struct ibv_send_wr * wr_list_send = NULL;
+static pthread_mutex_t rdma_local_region_lock;
 
 void die(const char *reason);
 
 /* Handling Connections */
 void add_rdma_connection(struct rdma_cm_id * conn);
 void remove_rdma_connection(struct rdma_cm_id * conn);
-struct rdma_cm_id * lookup_rdma_connection(struct sockaddr_in peer_addr);
+struct rdma_cm_id * lookup_rdma_connection(struct sockaddr_in peer_addr, int peer_id);
 
 void build_connection(struct rdma_cm_id *id);
 void build_params(struct rdma_conn_param *params);
@@ -108,10 +111,10 @@ void send_mr(void *context);
 void * get_local_message_region(void *context);
 char * get_peer_message_region(struct connection *conn);
 
-void build_context(struct ibv_context *verbs);
-void build_qp_attr(struct ibv_qp_init_attr *qp_attr);
+void build_context(struct ibv_context *verbs, struct connection *conn);
+void build_qp_attr(struct ibv_qp_init_attr *qp_attr, struct connection *conn);
 void on_completion(struct ibv_wc *);
-void * poll_cq(void *);
+void * poll_cq(struct connection *conn);
 void * poll_cm(struct rdma_event_channel *ec);
 void post_receives(struct connection *conn);
 void register_memory(struct connection *conn);
@@ -131,7 +134,6 @@ void remote_assoc_delete(const char *key, const uint32_t hv);
 /* REMOTE OPERATIONS*/
 char* get_remote_item(remote_item* r_it);
 void set_remote_item(remote_item *r_it, item *it);
-void add_remote_set_entry(remote_item *r_it, item *it);
 void send_remote_page(void *context);
 
 #endif

@@ -48,6 +48,10 @@
 #include <limits.h>
 #include <sysexits.h>
 #include <stddef.h>
+#include <sys/ioctl.h>
+#include <net/if.h>
+#include <sys/types.h>
+#include <netinet/in.h>
 
 /* FreeBSD 4.x doesn't have IOV_MAX exposed. */
 #ifndef IOV_MAX
@@ -82,22 +86,6 @@ static void conn_set_state(conn *c, enum conn_states state);
 static int start_conn_timeout_thread();
 static int start_file_write_thread();
 static int start_marginal_utility_thread();
-
-
-// /* RDMA stuff*/
-// const int TIMEOUT_IN_MS = 500; /* ms */
-// static bool AM_LENDER = false;
-// static bool should_send_mr = false;
-// static bool sending_op = false;
-// static int on_connect_request(struct rdma_cm_id *id);
-// static int on_addr_resolved(struct rdma_cm_id *id);
-// static int on_connection(struct rdma_cm_id *id);
-// static int on_disconnect(struct rdma_cm_id *id);
-// static int on_event(struct rdma_cm_event *event);
-// static int on_route_resolved(struct rdma_cm_id *id);
-// //static void usage(const char *argv0);
-// // static int start_rdma_server_handler_thread();
-// // static int start_rdma_client_handler_thread();
 
 /* stats */
 static void stats_init(void);
@@ -405,62 +393,62 @@ static int start_conn_timeout_thread() {
     return 0;
 }
 
-/* Thread for writing a few stats to a file */
+/* Log Generation Thread */
 
 static pthread_t file_write_tid;
 
 static void *file_write_thread(void *arg) {
     
-    //int sleep_time = 1;
+    int sleep_time = 1;
     
-   // char file_path_hit[100],file_path_memory[100],file_path_stat[100];;
-     //mkdir("/users/AMH/Log",0755);
-     //mkdir("/users/AMH/Log/HitRatio",0755);
-     //mkdir("/users/AMH/Log/Memory",0755);
-     //mkdir("/users/AMH/Log/Stats",0755);
-     //sprintf(file_path_hit,"/users/AMH/Log/HitRatio/hit_rate_stats_%d.csv\0",(settings.port - 11212));
-     //sprintf(file_path_memory,"/users/AMH/Log/Memory/memory_stats_%d.csv\0",(settings.port - 11212));
-     //sprintf(file_path_stat,"/users/AMH/Log/Stats/stat_stats_%d.csv\0",(settings.port - 11212));
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    struct ifreq ifr;
+    ifr.ifr_addr.sa_family = AF_INET;
+    strncpy(ifr.ifr_name, "enp65s0f0np0", IFNAMSIZ-1);
+    ioctl(fd, SIOCGIFADDR, &ifr);
+    close(fd);
 
-    //mkdir("~/Log",0755);
-    //mkdir("~/Log/HitRatio",0755);
-    //mkdir("~/Log/Memory",0755);
-    //sprintf(file_path_hit,"~/Log/HitRatio/hit_rate_stats_%d.csv\0",(settings.port - 11212));
-    //sprintf(file_path_memory,"~/Log/Memory/memory_stats_%d.csv\0",(settings.port - 11212));
+    char file_path_hit[100],file_path_memory[100];
+    mkdir("/users/AMH/Log",0755);
+    mkdir("/users/AMH/Log/memory",0755);
+    mkdir("/users/AMH/Log/hitRatio",0755);
+    sprintf(file_path_hit,"/users/AMH/Log/hitRatio/hit_stats_%s_%d.csv\0",
+            inet_ntoa(((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr), settings.port);
+    sprintf(file_path_memory,"/users/AMH/Log/memory/memory_stats_%s_%d.csv\0",
+            inet_ntoa(((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr), settings.port);
+
     
-    //FILE *f = fopen(file_path_hit,"w");
-    //FILE *f2 = fopen(file_path_memory,"w");
-    //FILE *f3 = fopen(file_path_stat,"w");
+    FILE *f = fopen(file_path_hit,"w");
+    FILE *f2 = fopen(file_path_memory,"w");
 
-    //fprintf(f,"total,class_2,class_3,class_4,class_5,class_6,class_7,class_8,class_9\n");
-    //fprintf(f2,"total,class_2,class_3,class_4,class_5,class_6,class_7,class_8,class_9\n");
-    //fprintf(f3,"total,hits\n");
+    fprintf(f,"last_sec_total_req,last_sec_hits, overall_hit_rate\n");
+    fprintf(f2,"ts,extra_remote,total,class_2,class_3,class_4,class_5,class_6,class_7,class_8,class_9\n");
 
-    //struct thread_stats thread_stats;
-    //struct slab_stats slab_stats;
+    struct thread_stats thread_stats;
+    struct slab_stats slab_stats;
+    uint64_t old_total = 0, old_hits = 0;
 
-    //while(1) {
-       
-       // sleep(sleep_time);
+    while(1) {
+        sleep(sleep_time);
 
-      //  threadlocal_stats_aggregate(&thread_stats);
-       // slab_stats_aggregate(&thread_stats, &slab_stats);
+        threadlocal_stats_aggregate(&thread_stats);
+        slab_stats_aggregate(&thread_stats, &slab_stats);
 
-      //  if(thread_stats.get_cmds)
-         //   fprintf(f,"%.2f,",(double)slab_stats.get_hits / (double)thread_stats.get_cmds * 100);
+        if(thread_stats.get_cmds)            
+            fprintf(f,"%lu,%lu,%.2f\n", thread_stats.get_cmds - old_total, 
+                                       slab_stats.get_hits - old_hits, 
+                                       (double)slab_stats.get_hits / (double)thread_stats.get_cmds * 100);
+        old_total = thread_stats.get_cmds;
+        old_hits = slab_stats.get_hits;
         
-       // fprintf(f3,"%lu,%lu\n", thread_stats.get_cmds, slab_stats.get_hits);
-        
-       // slabs_stats_file_write(f,f2,thread_stats);
-        
-       // fflush(f);
-       // fflush(f2);
-       // fflush(f3);
-   // }
+        slabs_stats_file_write(f2);
+            
+        fflush(f);
+        fflush(f2);
+    }
     
-    //fclose(f);
-    //fclose(f2);
-    //fclose(f3);
+    fclose(f);
+    fclose(f2);
     return NULL;
 }
 
@@ -477,34 +465,27 @@ static int start_file_write_thread() {
     return 0;
 }
 
-/* Thread for calculating marginal utilities */
+/* Marginal utility Thread */
 
 static pthread_t marginal_utility_tid;
 time_elapsed = 0;
-timee = 0;
 
 static void *marginal_utility_thread(void *arg) {
     
-    int sleep_time = 1;
+    int sleep_time = 100000;  // 5 times per second
     struct thread_stats thread_stats;
     struct slab_stats slab_stats;
 
     double oldgets = 0, oldhits = 0;
 
     while(1) {
-       
-        sleep(sleep_time);
+        usleep(sleep_time);
         time_elapsed++;
         
         threadlocal_stats_aggregate(&thread_stats);
         slab_stats_aggregate(&thread_stats, &slab_stats);
-        calculate_scores(thread_stats.get_misses);
-        if((double)thread_stats.get_cmds)
-            timee++;
-        //find_highest_mu(thread_stats.get_misses,(double)(slab_stats.get_hits - oldhits)/ ((double)thread_stats.get_cmds - oldgets) * 100);
-        
-        //oldgets = (double)thread_stats.get_cmds;
-        //oldhits = (double)slab_stats.get_hits;
+        calculate_scores(thread_stats.get_misses, 
+            (double)((double)thread_stats.get_misses / (double) thread_stats.get_cmds));
     }
     
     return NULL;
@@ -522,213 +503,6 @@ static int start_marginal_utility_thread() {
 
     return 0;
 }
-
-// /* RDMA connection event handler threads */
-
-// static pthread_t rdma_server_handler_tid;
-
-// static void *rdma_server_handler_thread(){
-
-//     bool transfer_mode = true; // Write or Read
-//     struct sockaddr_in6 client_addr;
-//     struct rdma_cm_event *event = NULL;
-//     struct rdma_cm_id *conn = NULL;
-//     struct rdma_event_channel *ec = NULL;
-//     uint16_t port = 0;
-
-//     while(1){
-//         if(1){//should_broadcast){
-//             if (transfer_mode)
-//                 set_mode(M_WRITE);
-//             else
-//                 set_mode(M_READ);
-
-//             /* Server-side preparation - All tenants are servers by default*/
-
-//             printf("\nListening for connections ");
-//             TEST_Z(ec = rdma_create_event_channel());
-//             TEST_NZ(rdma_create_id(ec, &conn, NULL, RDMA_PS_TCP));
-
-//             memset(&client_addr, 0, sizeof(client_addr));
-//             client_addr.sin6_family = AF_INET6;
-//             TEST_NZ(rdma_bind_addr(conn, (struct sockaddr *)&client_addr)); // Bind to an empty address for the potential client
-//             TEST_NZ(rdma_listen(conn, 10)); 
-
-//             port = ntohs(rdma_get_src_port(conn));
-//             printf("on port: %d\n", port);
-//             set_rdma_access_port(port);
-
-//             while (rdma_get_cm_event(ec, &event) == 0){
-//                 struct rdma_cm_event event_copy;
-
-//                 memcpy(&event_copy, event, sizeof(*event));
-//                 rdma_ack_cm_event(event);
-
-//                 if (on_event(&event_copy))
-//                     break;
-//             }
-
-//             //rdma_destroy_id(conn);
-//             rdma_destroy_event_channel(ec);
-//         }
-//     }
-// }
-
-// static int start_rdma_server_handler_thread(){
-//     int ret;
-
-//     if ((ret = pthread_create(&rdma_server_handler_tid, NULL,
-//         rdma_server_handler_thread, NULL)) != 0) {
-//         fprintf(stderr, "Can't create rdma_server_handler thread: %s\n",
-//             strerror(ret));
-//         return -1;
-//     }
-
-//     return 0;
-// }
-
-// static pthread_t rdma_client_handler_tid;
-
-// static void *rdma_client_handler_thread(){
-
-//     bool transfer_mode = false; // Write or Read
-//     struct addrinfo *remote_addr;
-//     struct rdma_cm_event *event = NULL;
-//     struct rdma_cm_id *conn = NULL;
-//     struct rdma_event_channel *ec = NULL;
-
-//     char *ip, *port;
-
-//     while(1){
-//         if(should_send_mr || sending_op){ /* A remote tenant is in need of memory*/
-
-//             if(should_send_mr){
-//                 struct tracker trck = get_tracker();
-//                 ip = trck.remote_server_ip;
-//                 port = trck.remote_server_port;
-//             }
-//             else if(sending_op){
-
-//             }
-//             /* Client-side preparation - A server that wants to access another server i.e., a client*/
-
-//             if (transfer_mode)
-//                 set_mode(M_WRITE);
-//             else
-//                 set_mode(M_READ);
-
-//             TEST_Z(ec = rdma_create_event_channel());
-//             TEST_NZ(rdma_create_id(ec, &conn, NULL, RDMA_PS_TCP));
-
-//             struct tracker trck = get_tracker();
-//             printf("\n--Initiating access to a remote server. ");
-//             TEST_NZ(getaddrinfo(ip, port, NULL, &remote_addr));
-//             TEST_NZ(rdma_resolve_addr(conn, NULL, remote_addr->ai_addr, TIMEOUT_IN_MS));
-//             freeaddrinfo(remote_addr);
-//             printf("Remote address resolved.\n");
-        
-
-//             while (rdma_get_cm_event(ec, &event) == 0){
-//                 struct rdma_cm_event event_copy;
-
-//                 memcpy(&event_copy, event, sizeof(*event));
-//                 rdma_ack_cm_event(event);
-
-//                 if (on_event(&event_copy))
-//                     break;
-//             }
-//             should_send_mr = false;
-//             //rdma_destroy_id(conn);
-//             rdma_destroy_event_channel(ec);
-//         }
-//         sleep(2);
-//     }
-// }
-
-// void initiate_RDMA_MR(){
-//     should_send_mr = true;
-// }
-
-// static int start_rdma_client_handler_thread(){
-//     int ret;
-
-//     if ((ret = pthread_create(&rdma_client_handler_tid, NULL,
-//         rdma_client_handler_thread, NULL)) != 0) {
-//         fprintf(stderr, "Can't create rdma_client_handler thread: %s\n",
-//             strerror(ret));
-//         return -1;
-//     }
-
-//     return 0;
-// }
-
-
-// int on_addr_resolved(struct rdma_cm_id *id){
-//     printf("address resolved.\n");
-//     AM_LENDER = true;
-//     build_connection(id);
-//     sprintf(get_local_message_region(id->context), "message from active/client side with pid %d", getpid());
-//     TEST_NZ(rdma_resolve_route(id, TIMEOUT_IN_MS));
-
-//     return 0;
-// }
-
-// int on_connect_request(struct rdma_cm_id *id){
-//     struct rdma_conn_param cm_params;
-
-//     printf("received connection request.\n");
-//     build_connection(id);
-//     build_params(&cm_params);
-//     sprintf(get_local_message_region(id->context), "message from passive/server side with pid %d", getpid());
-//     TEST_NZ(rdma_accept(id, &cm_params));
-
-//     return 0;
-// }
-
-// int on_connection(struct rdma_cm_id *id){
-//     on_connect(id->context);
-//     if(AM_LENDER)
-//         send_mr(id->context); // ?
-
-//     return 0;
-// }
-
-// int on_disconnect(struct rdma_cm_id *id){
-//     printf("peer disconnected.\n");
-//     destroy_connection(id->context);
-//     return 1;
-// }
-
-// int on_event(struct rdma_cm_event *event){
-//     int r = 0;
-
-//     if (event->event == RDMA_CM_EVENT_CONNECT_REQUEST)
-//         r = on_connect_request(event->id);
-//     else if (event->event == RDMA_CM_EVENT_ADDR_RESOLVED)
-//         r = on_addr_resolved(event->id);
-//     else if (event->event == RDMA_CM_EVENT_ROUTE_RESOLVED)
-//         r = on_route_resolved(event->id);
-//     else if (event->event == RDMA_CM_EVENT_ESTABLISHED)
-//         r = on_connection(event->id);
-//     else if (event->event == RDMA_CM_EVENT_DISCONNECTED)
-//         r = on_disconnect(event->id);
-//     else {
-//         fprintf(stderr, "on_event: %d\n", event->event);
-//         die("on_event: unknown event.");
-//     }
-
-//     return r;
-// }
-
-// int on_route_resolved(struct rdma_cm_id *id){
-//     struct rdma_conn_param cm_params;
-
-//     printf("route resolved.\n");
-//     build_params(&cm_params);
-//     TEST_NZ(rdma_connect(id, &cm_params));
-
-//     return 0;
-// }
 
 /*
  * Initializes the connections array. We don't actually allocate connection
@@ -796,7 +570,7 @@ void conn_close_idle(conn *c) {
 
         c->thread->stats.idle_kicks++;
 
-        conn_set_state(c, conn_closing);printf("-------------HERE 1\n");
+        conn_set_state(c, conn_closing);
         drive_machine(c);
     }
 }
@@ -1750,10 +1524,16 @@ static void complete_update_bin(conn *c) {
         ch->used += 2;
     }
 
-    if(it->r_it != NULL){
-        set_remote_item(it->r_it, it);
-        //add_remote_set_entry(it->r_it, it);
-        //printf("key: %s, data is %s\n", ITEM_key(it), ITEM_data(it));
+    if(it->r_it != NULL){ /* This is a temp item that needs to be written in a remote tenant*/
+        remote_item * r_it = it->r_it;
+        r_it->key = (char*) malloc((it->nkey + 1) * sizeof(char));
+        memcpy(r_it->key, ITEM_key(it), it->nkey);
+        r_it->nkey = it->nkey;
+        r_it->key[it->nkey] = '\0';
+        r_it->nbytes = it->nbytes; 
+        
+        slabs_rdma_insert(r_it);   /* insert to local hash table so we can find it for future GETs*/
+        set_remote_item(r_it, it); /* write the temp item to remote tenant via RDMA WRITE*/
         ret = STORED;
     }
     else
@@ -1809,10 +1589,17 @@ static void complete_update_bin(conn *c) {
         write_bin_error(c, eno, NULL, 0);
     }
     if(it->r_it != NULL)
-        free(it);
+        free(it);   /* free the temp item */
     else
         item_remove(c->item);       /* release the c->item reference */
     c->item = 0;
+}
+
+static inline void now_epoch_sec_nsec(long *sec, long *nsec) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    *sec = ts.tv_sec;
+    *nsec = ts.tv_nsec;
 }
 
 static void process_bin_get_or_touch(conn *c) {
@@ -1845,39 +1632,24 @@ static void process_bin_get_or_touch(conn *c) {
 
     bool remote_alloc = false;
     remote_item* remote_it = NULL;
-    if(!it) {   // It missed the local queue, check the remote items before reporting a miss
+    if(!it) {   /* missed the local queue, check the remote items before reporting a miss */
 
         remote_it = slabs_remoteq_lookup(key, nkey);
 
         if(remote_it){
-            //c->thread->stats.slab_stats[remote_it->slabs_clsid].remoteq_hits++;
-            //c->thread->stats.slab_stats[remote_it->slabs_clsid].q_misses++;
-            slabclass_t *p = (slabclass_t *) get_slabclass(remote_it->slabs_clsid);
             pthread_mutex_lock(&rdma_local_region_lock);
-            it = (item *) get_remote_item(remote_it);   // Maybe we can skip retriving the actual item to reduce overhead. Report a hit and move on!
-            //int counter = 0;
-            // while(it->nbytes == 0){
-            //     nanosleep(&((struct timespec){0,1}), &((struct timespec){0,0}));
-            //     //counter++;
-            //     //printf("remote item nbyte is :%d , ",remote_it->nbytes);
-            //  }
-            //printf("Counter: %d\n", counter);
-            
-            // if(it->nbytes != 0){
-            //     printf("remote item retrieval successful, retrived: item data: %s, size: %d \n", ITEM_data(it), it->nbytes);//key: %s, nkey:%d, goal: %s, nkey: %d.\n", ITEM_key(it), it->nkey, remote_it->key, remote_it->nkey); 
-            // }
-            // else{
-            //     printf("remote item retrieval failed.\n");
-            //     it = NULL;
-            // }
+            // long w0s, w0ns, w1s, w1ns;
+            // now_epoch_sec_nsec(&w0s, &w0ns);
+            it = (item *) get_remote_item(remote_it);
+            // now_epoch_sec_nsec(&w1s, &w1ns);
+
+            // int64_t wait_ns = (int64_t)(w1s - w0s) * 1000000000LL + (w1ns - w0ns);
+            // printf("remote GET latency: %lld ns\n", wait_ns);
             remote_alloc = true;
         }
     }
 
-
     if (it) {
-        //  if(remote_alloc)
-        //     printf("item data[0]: %c\n", *ITEM_data(it));
         /* the length has two unnecessary bytes ("\r\n") */
         uint16_t keylen = 0;
         uint32_t bodylen = sizeof(rsp->message.body) + (it->nbytes - 2);
@@ -1926,8 +1698,6 @@ static void process_bin_get_or_touch(conn *c) {
         if (should_return_value) {
             /* Add the data minus the CRLF */
             if ((it->it_flags & ITEM_CHUNKED) == 0) {
-                if(remote_alloc && it->nbytes == 0)
-                    printf("Value Size is ZERO. WHY????\n");
                 add_iov(c, ITEM_data(it), it->nbytes - 2);
             } else {
                 add_chunked_item_iovs(c, it, it->nbytes - 2);
@@ -1936,8 +1706,8 @@ static void process_bin_get_or_touch(conn *c) {
         conn_set_state(c, conn_mwrite);
         c->write_and_go = conn_new_cmd;
         /* Remember this command so we can garbage collect it later */
-        //if(!remote_alloc)
-        c->item = it;
+        if(!remote_alloc)
+            c->item = it;
     } else {
         pthread_mutex_lock(&c->thread->stats.mutex);
         if (should_touch) {
@@ -1949,12 +1719,12 @@ static void process_bin_get_or_touch(conn *c) {
         }
         pthread_mutex_unlock(&c->thread->stats.mutex);
         
-        shadow_item* shadow_it = slabs_shadowq_lookup(key,nkey); //FIXME - redundat lookup, delete in overhead measurments
+        shadow_item* shadow_it = slabs_shadowq_lookup(key,nkey);
 
-        if (shadow_it){
-             c->thread->stats.slab_stats[shadow_it->slabs_clsid].shadowq_hits++;
-             c->thread->stats.slab_stats[shadow_it->slabs_clsid].q_misses++;
-        }
+        // if (shadow_it){
+        //      c->thread->stats.slab_stats[shadow_it->slabs_clsid].shadowq_hits++;
+        //      c->thread->stats.slab_stats[shadow_it->slabs_clsid].q_misses++;
+        // }
         if (should_touch) {
             MEMCACHED_COMMAND_TOUCH(c->sfd, key, nkey, -1, 0);
         } else {
@@ -2191,7 +1961,7 @@ static void bin_read_key(conn *c, enum bin_substates next_substate, int extra) {
                     fprintf(stderr, "%d: Failed to grow buffer.. closing connection\n",
                             c->sfd);
                 }
-                conn_set_state(c, conn_closing);printf("-------------HERE 2\n");
+                conn_set_state(c, conn_closing);
                 return;
             }
 
@@ -2222,7 +1992,6 @@ static void handle_binary_protocol_error(conn *c) {
                 c->binary_header.request.opcode, c->sfd);
     }
     c->write_and_go = conn_closing;
-    printf("HHHHHHERE 1\n");
 }
 
 static void init_sasl_conn(conn *c) {
@@ -2440,16 +2209,12 @@ static void dispatch_bin_command(conn *c) {
     if (keylen > bodylen || keylen + extlen > bodylen) {
         write_bin_error(c, PROTOCOL_BINARY_RESPONSE_UNKNOWN_COMMAND, NULL, 0);
         c->write_and_go = conn_closing;
-            printf("HHHHHHERE 2\n");
-
         return;
     }
 
     if (settings.sasl && !authenticated(c)) {
         write_bin_error(c, PROTOCOL_BINARY_RESPONSE_AUTH_ERROR, NULL, 0);
         c->write_and_go = conn_closing;
-            printf("HHHHHHERE 3\n");
-
         return;
     }
 
@@ -2585,7 +2350,7 @@ static void dispatch_bin_command(conn *c) {
                 write_bin_response(c, NULL, 0, 0, 0);
                 c->write_and_go = conn_closing;
                 if (c->noreply) {
-                    conn_set_state(c, conn_closing);printf("-------------HERE 3\n");
+                    conn_set_state(c, conn_closing);
                 }
             } else {
                 protocol_error = 1;
@@ -2667,9 +2432,6 @@ static void process_bin_update(conn *c) {
 
     it = item_alloc(key, nkey, req->message.body.flags,
             realtime(req->message.body.expiration), vlen+2);
-
-    // if(it == -1)
-    //     return;
         
     if (it == 0) {
         enum store_item_type status;
@@ -3130,10 +2892,21 @@ enum store_item_type do_store_item(item *it, int comm, conn *c, const uint32_t h
             if (old_it != NULL)
                 item_replace(old_it, it, hv);
             else {
-                shadow_item* shadow_it = shadow_assoc_find(key, it->nkey, hv);
-                if (shadow_it != NULL) {
-                    evict_shadowq_item(shadow_it);
+                shadow_item *shadow_it = shadow_find_and_pin(key, it->nkey, hv);
+
+                if (shadow_it) {
+                    slabclass_t *p = get_slabclass(shadow_it->slabs_clsid);
+
+                    pthread_mutex_lock(&p->shadowq_lock);
+
+                    if (!shadow_it->dead) // Only evict if not already dead
+                        evict_shadowq_item_locked(shadow_it);
+
+                    pthread_mutex_unlock(&p->shadowq_lock);
+
+                    shadow_release(shadow_it, hv);
                 }
+
                 do_item_link(it, hv);
             }
 
@@ -3691,18 +3464,6 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
 
             it = item_get(key, nkey, c, DO_UPDATE);
 
-            if(!it) {   // It missed the local queue, check the remote items before reporting a miss
-
-                remote_item* remote_it = slabs_remoteq_lookup(key, nkey);
-
-                if(remote_it){
-                    //c->thread->stats.slab_stats[remote_it->slabs_clsid].remoteq_hits++;
-                    //c->thread->stats.slab_stats[remote_it->slabs_clsid].q_misses++;
-                    printf("item is remote !\n");
-                    //it = get_remote_item(remote_it);     // Maybe we can skip retriving the actual item to reduce overhead. Report a hit and move on!
-                }
-            }
-
             if (settings.detail_enabled) {
                 stats_prefix_record_get(key, nkey, NULL != it);
             }
@@ -3826,10 +3587,10 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
                 c->thread->stats.get_cmds++;
                 pthread_mutex_unlock(&c->thread->stats.mutex);
                 shadow_item* shadow_it = slabs_shadowq_lookup(key,nkey); //FIXME - redundat lookup, delete in overhead measurments 
-                if (shadow_it){
-                    c->thread->stats.slab_stats[shadow_it->slabs_clsid].shadowq_hits++;
-                    c->thread->stats.slab_stats[shadow_it->slabs_clsid].q_misses++;
-                }
+                // if (shadow_it){  // Causes memory corruption on ETC workload - should investigate
+                //     c->thread->stats.slab_stats[shadow_it->slabs_clsid].shadowq_hits++;
+                //     c->thread->stats.slab_stats[shadow_it->slabs_clsid].q_misses++;
+                // }
 
                 MEMCACHED_COMMAND_GET(c->sfd, key, nkey, -1, 0);
             }
@@ -4511,12 +4272,12 @@ static void process_command(conn *c, char *command) {
 
     } else if (ntokens == 2 && (strcmp(tokens[COMMAND_TOKEN].value, "quit") == 0)) {
 
-        conn_set_state(c, conn_closing);printf("-------------HERE 4\n");
+        conn_set_state(c, conn_closing);
 
     } else if (ntokens == 2 && (strcmp(tokens[COMMAND_TOKEN].value, "shutdown") == 0)) {
 
         if (settings.shutdown_command) {
-            conn_set_state(c, conn_closing);printf("-------------HERE 5\n");
+            conn_set_state(c, conn_closing);
             raise(SIGINT);
         } else {
             out_string(c, "ERROR: shutdown not enabled");
@@ -4743,7 +4504,7 @@ static int try_read_command(conn *c) {
                     fprintf(stderr, "Invalid magic:  %x\n",
                             c->binary_header.request.magic);
                 }
-                conn_set_state(c, conn_closing);printf("-------------HERE 6\n");
+                conn_set_state(c, conn_closing);
                 return -1;
             }
 
@@ -4788,7 +4549,7 @@ static int try_read_command(conn *c) {
                 if (ptr - c->rcurr > 100 ||
                     (strncmp(ptr, "get ", 4) && strncmp(ptr, "gets ", 5))) {
 
-                    conn_set_state(c, conn_closing);printf("-------------HERE 7\n");
+                    conn_set_state(c, conn_closing);
                     return 1;
                 }
             }
@@ -4894,8 +4655,6 @@ static enum try_read_result try_read_network(conn *c) {
                 c->rbytes = 0; /* ignore what we read */
                 out_of_memory(c, "SERVER_ERROR out of memory reading request");
                 c->write_and_go = conn_closing;
-                    printf("HHHHHHERE 4\n");
-
                 return READ_MEMORY_ERROR;
             }
             c->rcurr = c->rbuf = new_rbuf;
@@ -5033,7 +4792,7 @@ static enum transmit_result transmit(conn *c) {
             if (!update_event(c, EV_WRITE | EV_PERSIST)) {
                 if (settings.verbose > 0)
                     fprintf(stderr, "Couldn't update event\n");
-                conn_set_state(c, conn_closing);printf("-------------HERE 8\n");
+                conn_set_state(c, conn_closing);
                 return TRANSMIT_HARD_ERROR;
             }
             return TRANSMIT_SOFT_ERROR;
@@ -5046,7 +4805,7 @@ static enum transmit_result transmit(conn *c) {
         if (IS_UDP(c->transport))
             conn_set_state(c, conn_read);
         else
-            conn_set_state(c, conn_closing);printf("-------------HERE 9\n");
+            conn_set_state(c, conn_closing);
         return TRANSMIT_HARD_ERROR;
     } else {
         return TRANSMIT_COMPLETE;
@@ -5215,7 +4974,7 @@ static void drive_machine(conn *c) {
             if (!update_event(c, EV_READ | EV_PERSIST)) {
                 if (settings.verbose > 0)
                     fprintf(stderr, "Couldn't update event\n");
-                conn_set_state(c, conn_closing);printf("-------------HERE 10\n");
+                conn_set_state(c, conn_closing);
                 break;
             }
 
@@ -5234,7 +4993,7 @@ static void drive_machine(conn *c) {
                 conn_set_state(c, conn_parse_cmd);
                 break;
             case READ_ERROR:
-                conn_set_state(c, conn_closing);printf("-------------HERE 11\n");
+                conn_set_state(c, conn_closing);
                 break;
             case READ_MEMORY_ERROR: /* Failed to allocate more memory */
                 /* State already set by try_read_network */
@@ -5271,7 +5030,7 @@ static void drive_machine(conn *c) {
                     if (!update_event(c, EV_WRITE | EV_PERSIST)) {
                         if (settings.verbose > 0)
                             fprintf(stderr, "Couldn't update event\n");
-                        conn_set_state(c, conn_closing);printf("-------------HERE 12\n");
+                        conn_set_state(c, conn_closing);
                         break;
                     }
                 }
@@ -5290,7 +5049,7 @@ static void drive_machine(conn *c) {
                 if (settings.verbose) {
                     fprintf(stderr, "Invalid rlbytes to read: len %d\n", c->rlbytes);
                 }
-                conn_set_state(c, conn_closing);printf("-------------HERE 13\n");
+                conn_set_state(c, conn_closing);
                 break;
             }
 
@@ -5330,7 +5089,7 @@ static void drive_machine(conn *c) {
             }
 
             if (res == 0) { /* end of stream */
-                conn_set_state(c, conn_closing);printf("-------------HERE 14\n");
+                conn_set_state(c, conn_closing);
                 break;
             }
 
@@ -5338,7 +5097,7 @@ static void drive_machine(conn *c) {
                 if (!update_event(c, EV_READ | EV_PERSIST)) {
                     if (settings.verbose > 0)
                         fprintf(stderr, "Couldn't update event\n");
-                    conn_set_state(c, conn_closing);printf("-------------HERE 15\n");
+                    conn_set_state(c, conn_closing);
                     break;
                 }
                 stop = true;
@@ -5361,7 +5120,7 @@ static void drive_machine(conn *c) {
                         (long)c->rcurr, (long)c->ritem, (long)c->rbuf,
                         (int)c->rlbytes, (int)c->rsize);
             }
-            conn_set_state(c, conn_closing);printf("-------------HERE 16\n");
+            conn_set_state(c, conn_closing);
             break;
 
         case conn_swallow:
@@ -5390,14 +5149,14 @@ static void drive_machine(conn *c) {
                 break;
             }
             if (res == 0) { /* end of stream */
-                conn_set_state(c, conn_closing);printf("-------------HERE 17\n");
+                conn_set_state(c, conn_closing);
                 break;
             }
             if (res == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
                 if (!update_event(c, EV_READ | EV_PERSIST)) {
                     if (settings.verbose > 0)
                         fprintf(stderr, "Couldn't update event\n");
-                    conn_set_state(c, conn_closing);printf("-------------HERE 18\n");
+                    conn_set_state(c, conn_closing);
                     break;
                 }
                 stop = true;
@@ -5406,7 +5165,7 @@ static void drive_machine(conn *c) {
             /* otherwise we have a real error, on which we close the connection */
             if (settings.verbose > 0)
                 fprintf(stderr, "Failed to read, and not due to blocking\n");
-            conn_set_state(c, conn_closing);printf("-------------HERE 19\n");
+            conn_set_state(c, conn_closing);
             break;
 
         case conn_write:
@@ -5419,7 +5178,7 @@ static void drive_machine(conn *c) {
                 if (add_iov(c, c->wcurr, c->wbytes) != 0) {
                     if (settings.verbose > 0)
                         fprintf(stderr, "Couldn't build response\n");
-                    conn_set_state(c, conn_closing);printf("-------------HERE 20\n");
+                    conn_set_state(c, conn_closing);
                     break;
                 }
             }
@@ -5430,7 +5189,7 @@ static void drive_machine(conn *c) {
           if (IS_UDP(c->transport) && c->msgcurr == 0 && build_udp_headers(c) != 0) {
             if (settings.verbose > 0)
               fprintf(stderr, "Failed to build UDP headers\n");
-            conn_set_state(c, conn_closing);printf("-------------HERE 21\n");
+            conn_set_state(c, conn_closing);
             break;
           }
             switch (transmit(c)) {
@@ -5452,7 +5211,7 @@ static void drive_machine(conn *c) {
                 } else {
                     if (settings.verbose > 0)
                         fprintf(stderr, "Unexpected state %d\n", c->state);
-                    conn_set_state(c, conn_closing);printf("-------------HERE 22\n");
+                    conn_set_state(c, conn_closing);
                 }
                 break;
 
@@ -6419,7 +6178,7 @@ int main (int argc, char **argv) {
         case 'p':
             settings.port = atoi(optarg);
             tcp_specified = true;
-            init_shared_names(settings.port);
+            // init_shared_names(settings.port);
             break;
         case 's':
             settings.socketpath = optarg;
@@ -6997,6 +6756,7 @@ int main (int argc, char **argv) {
     logger_init();
     stats_init();
     assoc_init(settings.hashpower_init);
+    shadow_locks_init();
     shadow_assoc_init(settings.hashpower_init);
     remote_assoc_init(settings.hashpower_init);
     conn_init();
@@ -7036,7 +6796,7 @@ int main (int argc, char **argv) {
     if (settings.idle_timeout && start_conn_timeout_thread() == -1) {
         exit(EXIT_FAILURE);
     }
-    
+
     if (start_file_write_thread() == -1){
         exit(EXIT_FAILURE);
     }

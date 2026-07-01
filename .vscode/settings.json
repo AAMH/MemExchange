@@ -21,6 +21,7 @@
         "shadow_assoc.h": "c",
         "in.h": "c",
         "mman.h": "c",
-        "items.h": "c"
+        "items.h": "c",
+        "tcp.h": "c"
     }
 }

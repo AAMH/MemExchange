@@ -8,7 +8,8 @@
 
 node_t *new_tree_node(struct timeval key) 
 {
-	node_t *node = (node_t *)malloc(sizeof(struct _avl_node_t));
+	node_t *node = malloc(sizeof(*node));
+    assert(node);
     node->parent = NULL;
 	node->time = key; 
 	node->left = NULL; 
@@ -19,10 +20,13 @@ node_t *new_tree_node(struct timeval key)
 	return node; 
 } 
 
-tree_t *new_tree()
+tree_t *new_tree(void)
 {
-    tree_t *t = (tree_t *)malloc(sizeof(struct _avl_node_t));
+    tree_t *t = malloc(sizeof(*t));
+    assert(t);
+
     t->root = NULL;
+    pthread_mutex_init(&t->lock, NULL);
 
     return t;
 }
@@ -111,6 +115,22 @@ int balance_factor(node_t *n)
     return(height(n->left) - height(n->right));
 }
 
+static int compare_nodes(const node_t *a, const node_t *b)
+{
+    if (a->time.tv_sec != b->time.tv_sec)
+        return (a->time.tv_sec < b->time.tv_sec) ? -1 : 1;
+
+    if (a->time.tv_usec != b->time.tv_usec)
+        return (a->time.tv_usec < b->time.tv_usec) ? -1 : 1;
+
+    if (a->shadowItem < b->shadowItem)
+        return -1;
+    if (a->shadowItem > b->shadowItem)
+        return 1;
+
+    return 0;
+}
+
 void insert_tree_node(tree_t *t, node_t *n)
 {
     node_t *y = NULL;
@@ -118,9 +138,11 @@ void insert_tree_node(tree_t *t, node_t *n)
 
     while(temp != NULL){
         y = temp;
-        if(temp->time.tv_sec > n->time.tv_sec || (temp->time.tv_sec == n->time.tv_sec && temp->time.tv_usec > n->time.tv_usec))
+        int cmp = compare_nodes(n, temp);
+
+        if (cmp < 0) {
             temp = temp->left;
-        else{
+        } else {
             temp->weight++;
             temp = temp->right;
         }
@@ -129,10 +151,13 @@ void insert_tree_node(tree_t *t, node_t *n)
 
     if(y == NULL) //newly added node is root
         t->root = n;
-    else if(y->time.tv_sec > n->time.tv_sec || (y->time.tv_sec == n->time.tv_sec && y->time.tv_usec > n->time.tv_usec))
-        y->left = n;
-    else
-        y->right = n;
+    else {
+        int cmp = compare_nodes(n, y);
+        if (cmp < 0)
+            y->left = n;
+        else
+            y->right = n;
+    }
 
     node_t *z = n;
 
@@ -140,8 +165,9 @@ void insert_tree_node(tree_t *t, node_t *n)
         y->height = 1 + max(height(y->left), height(y->right));
 
         node_t *x = y->parent;
+        int bf = x ? balance_factor(x) : 0;
 
-        if(balance_factor(x) <= -2 || balance_factor(x) >= 2){ //grandparent is unbalanced
+        if(x && (bf <= -2 || bf >= 2)){ //grandparent is unbalanced
 
             if(y == x->left){
                 if(z == x->left->left) //case 1
@@ -278,17 +304,17 @@ void delete_tree_node(tree_t *t, node_t *z)
     }
 }
 
-node_t *search_tree(node_t *root, struct timeval key)
+node_t *search_tree(node_t *root, shadow_item *it)  // Not needed anymore, shadow items have direct reference to their tree node
 {
-    // Base Cases: root is null or key is present at root 
-    if (root == NULL || (root->time.tv_sec == key.tv_sec && root->time.tv_usec == key.tv_usec))
-        return root;
-    // Key is greater than root's key 
-    if (root->time.tv_sec < key.tv_sec || (root->time.tv_sec == key.tv_sec && root->time.tv_usec < key.tv_usec)) 
-        return search_tree(root->right, key); 
-    // Key is smaller than root's key     
-    else if(root->time.tv_sec > key.tv_sec || (root->time.tv_sec == key.tv_sec && root->time.tv_usec > key.tv_usec))
-        return search_tree(root->left, key); 
+    while (root != NULL) {
+        int cmp = compare_nodes(root, it);
+
+        if (cmp == 0)            return root;
+        else if (cmp < 0) root = root->right;
+        else               root = root->left;
+    }
+
+    return NULL;
 }
 
 // A utility function for preorder traversal of the tree. 
@@ -300,100 +326,6 @@ int preOrder(node_t *node)
     else
         return (1+ preOrder(node->left) + preOrder(node->right)); 
 } 
-
-shadow_item* create_shadow_item(item *it,u_int8_t clsid,u_int8_t nkey)
-{
-    shadow_item* shadow_it = (shadow_item*) malloc(sizeof(struct _shadow_item_t));
-    memset(shadow_it,0,sizeof(struct _shadow_item_t));
-    assert(shadow_it && it);
-    shadow_it->key = (char*)malloc(nkey*sizeof(char));
-    memcpy(shadow_it->key, ITEM_key(it), nkey);
-    shadow_it->nkey = nkey;
-    shadow_it->next = NULL;
-    shadow_it->prev = NULL;
-    shadow_it->h_next = NULL;
-    shadow_it->slabs_clsid = clsid;
-
-    return shadow_it;
-}
-
-void insert_shadowq_item(shadow_item *elem, unsigned int slabs_clsid)
-{
-    assert(elem);
-    pthread_mutex_lock(&shadow_lock);
-    elem->next = NULL;
-    elem->prev = NULL;
-    elem->slabs_clsid = slabs_clsid;
-
-    gettimeofday(&elem->last_seen_time, NULL);
-
-    //pthread_mutex_lock(&tree_lock);
-    slabclass_t *p = (slabclass_t *) get_slabclass(slabs_clsid);    
-    insert_tree_node(p->tree ,new_tree_node(elem->last_seen_time));
-    //pthread_mutex_unlock(&tree_lock);
-
-    shadow_item *old_shadowq_head = get_shadowq_head(slabs_clsid);
-    if (old_shadowq_head) {
-        elem->next = old_shadowq_head;
-        old_shadowq_head->prev = elem;
-    } else { //empty queue
-        set_shadowq_tail(elem, slabs_clsid);
-    }
-    set_shadowq_head(elem, slabs_clsid);
-    inc_shadowq_size(slabs_clsid);
-
-    pthread_mutex_unlock(&shadow_lock);
-
-    if (get_shadowq_size(slabs_clsid) > get_shadowq_max_items(slabs_clsid)) {
-        //printf("Evicting ------ slabs_clsid: %d\n ",slabs_clsid);
-        shadow_item *shadowq_tail = get_shadowq_tail(slabs_clsid);
-        evict_shadowq_item(shadowq_tail);
-    }
-}
-
-void remove_shadowq_item(shadow_item *elem,node_t *node)
-{
-    pthread_mutex_lock(&shadow_lock);
-    shadow_item *shadowq_tail = get_shadowq_tail(elem->slabs_clsid);
-    assert(shadowq_tail);
-    if (shadowq_tail == elem)
-        set_shadowq_tail(elem->prev, elem->slabs_clsid);
-
-    shadow_item *shadowq_head = get_shadowq_head(elem->slabs_clsid);
-    assert(shadowq_head);
-    if (shadowq_head == elem)
-        set_shadowq_head(elem->next, elem->slabs_clsid);
-        
-    if(node){    
-        //pthread_mutex_lock(&tree_lock);
-        slabclass_t *p = (slabclass_t *) get_slabclass(elem->slabs_clsid);
-        fix_weights(p->tree->root,node);
-        delete_tree_node(p->tree,node);
-        //pthread_mutex_unlock(&tree_lock);
-    }
-
-    if (elem->prev)
-        elem->prev->next = elem->next;
-    if (elem->next)
-        elem->next->prev = elem->prev;
-
-    dec_shadowq_size(elem->slabs_clsid);
-
-    elem->prev = NULL;
-    elem->next = NULL;
-
-    pthread_mutex_unlock(&shadow_lock);
-}
-
-void evict_shadowq_item(shadow_item *elem)
-{
-   remove_shadowq_item(elem, NULL);
-   uint32_t hv = hash(elem->key, elem->nkey);
-   shadow_assoc_delete(elem->key, elem->nkey, hv);
-
-   free(elem->key);
-   free(elem);
-}
 
 void fix_weights(node_t *root, node_t *node)
 {
@@ -413,46 +345,234 @@ int calculate_reuse_distance(node_t *root, node_t *node)
         if(node == (node->parent)->left)
             x += (node->parent)->weight + 1;
         node = node->parent;
-        //printf("%p -", node); 
     }
-    //printf("\n"); 
     return x;
+}
+
+#define KEY_PAD 4
+
+shadow_item* create_shadow_item(item *it, uint8_t clsid, uint16_t nkey)
+{
+    assert(it);
+
+    shadow_item *shadow_it = calloc(1, sizeof(*shadow_it));
+    if (!shadow_it) return NULL;
+
+    shadow_it->key = malloc((size_t)nkey + 1 + KEY_PAD);
+    if (!shadow_it->key) { free(shadow_it); return NULL; }
+
+    memcpy(shadow_it->key, ITEM_key(it), nkey);
+    shadow_it->key[nkey] = '\0';
+    memset(shadow_it->key + nkey + 1, 0, KEY_PAD);
+
+    shadow_it->nkey = nkey;
+    shadow_it->slabs_clsid = clsid;
+
+    atomic_init(&shadow_it->refcnt, 1); // structure-owned ref
+    shadow_it->dead = false;
+    shadow_it->tree_node = NULL;
+
+    return shadow_it;
+}
+
+void remove_shadowq_item_locked(shadow_item *elem)
+{
+    // p->shadowq_lock must already be held
+
+    if (elem->prev) elem->prev->next = elem->next;
+    if (elem->next) elem->next->prev = elem->prev;
+
+    if (get_shadowq_head(elem->slabs_clsid) == elem)
+        set_shadowq_head(elem->next, elem->slabs_clsid);
+
+    if (get_shadowq_tail(elem->slabs_clsid) == elem)
+        set_shadowq_tail(elem->prev, elem->slabs_clsid);
+
+    dec_shadowq_size(elem->slabs_clsid);
+
+    elem->prev = NULL;
+    elem->next = NULL;
+}
+
+void insert_shadowq_item_locked(shadow_item *elem)
+{
+    // p->shadowq_lock must already be held
+
+    uint8_t slabs_clsid = elem->slabs_clsid;
+
+    elem->prev = NULL;
+    shadow_item *old_head = get_shadowq_head(slabs_clsid);
+
+    elem->next = old_head;
+    if (old_head) old_head->prev = elem;
+    else set_shadowq_tail(elem, slabs_clsid);
+
+    set_shadowq_head(elem, slabs_clsid);
+    inc_shadowq_size(slabs_clsid);
+}
+
+void insert_shadowq_item(shadow_item *elem)
+{
+    assert(elem);
+    uint8_t clsid = elem->slabs_clsid;
+    slabclass_t *p = get_slabclass(clsid);
+
+    // Update timestamp (no shared state yet)
+    gettimeofday(&elem->last_seen_time, NULL);
+
+    // Insert into tree (tree is separate)
+    pthread_mutex_lock(&p->tree->lock);
+    node_t *tn = new_tree_node(elem->last_seen_time);
+    tn->shadowItem = elem;
+    elem->tree_node = tn;
+    insert_tree_node(p->tree, tn);
+    pthread_mutex_unlock(&p->tree->lock);
+
+    // Queue insert + possible eviction is ONE critical section
+    pthread_mutex_lock(&p->shadowq_lock);
+
+    insert_shadowq_item_locked(elem);
+
+    // Evict while still holding the lock so head/tail pointers are stable
+    if (get_shadowq_size(clsid) > get_shadowq_max_items(clsid)) {
+        shadow_item *victim = get_shadowq_tail(clsid);
+        if (victim) {
+            // evict will unlink while we're locked
+            evict_shadowq_item_locked(victim);
+        }
+    }
+
+    pthread_mutex_unlock(&p->shadowq_lock);
+}
+
+void remove_shadowq_item(shadow_item *elem)
+{
+    slabclass_t *p = get_slabclass(elem->slabs_clsid);
+    pthread_mutex_lock(&p->shadowq_lock);
+    remove_shadowq_item_locked(elem);
+    pthread_mutex_unlock(&p->shadowq_lock);
+}
+
+static void shadow_maybe_free(shadow_item *it)
+{
+    // called when refcnt already reached 0
+    free(it->key);
+    free(it);
+}
+
+void evict_shadowq_item_locked(shadow_item *victim)
+{
+    if (victim->dead) return;
+    // p->shadowq_lock must be held
+    // We will temporarily take tree lock and hash lock (in allowed order).
+
+    slabclass_t *p = get_slabclass(victim->slabs_clsid);
+
+    // 1) unlink from queue
+    remove_shadowq_item_locked(victim);
+
+    // 2) remove from tree (if present)
+    pthread_mutex_lock(&p->tree->lock);
+    node_t *node = victim->tree_node;
+    if (node) {
+        fix_weights(p->tree->root, node);
+        delete_tree_node(p->tree, node);
+        victim->tree_node = NULL;
+    }
+    pthread_mutex_unlock(&p->tree->lock);
+
+    // 3) remove from hash + mark dead + drop structure ref
+    uint32_t hv = hash(victim->key, victim->nkey);
+    pthread_mutex_t *hlk = shadow_hash_lock_for_hv(hv);
+    pthread_mutex_lock(hlk);
+
+    victim->dead = true;
+    shadow_assoc_delete(victim->key, victim->nkey, hv);
+
+    unsigned prev = atomic_fetch_sub_explicit(&victim->refcnt, 1, memory_order_relaxed);
+    bool free_now = (prev == 1); // now refcnt==0
+
+    pthread_mutex_unlock(hlk);
+
+    if (free_now) shadow_maybe_free(victim);
+}
+
+void shadow_release(shadow_item *it, uint32_t hv)
+{
+    pthread_mutex_t *hlk = shadow_hash_lock_for_hv(hv);
+    pthread_mutex_lock(hlk);
+
+    unsigned prev = atomic_fetch_sub_explicit(&it->refcnt, 1, memory_order_relaxed);
+    bool free_now = (prev == 1) && it->dead;
+
+    pthread_mutex_unlock(hlk);
+
+    if (free_now) shadow_maybe_free(it);
+}
+
+shadow_item *shadow_find_and_pin(const char *key, size_t nkey, uint32_t hv)
+{
+    pthread_mutex_t *hlk = shadow_hash_lock_for_hv(hv);
+    pthread_mutex_lock(hlk);
+
+    shadow_item *it = shadow_assoc_find(key, nkey, hv);
+    if (it && !it->dead) {
+        atomic_fetch_add_explicit(&it->refcnt, 1, memory_order_relaxed);
+    } else {
+        it = NULL;
+    }
+
+    pthread_mutex_unlock(hlk);
+    return it;
 }
 
 shadow_item* slabs_shadowq_lookup(char *key, const size_t nkey)
 {
     uint32_t hv = hash(key, nkey);
-    shadow_item* shadow_it = shadow_assoc_find(key, nkey, hv);
+    shadow_item *shadow_it = shadow_find_and_pin(key, nkey, hv);
+    if (!shadow_it) return NULL;
 
-    if (shadow_it){   
-        int x = -1;
-        pthread_mutex_lock(&tree_lock);
-        slabclass_t *p = (slabclass_t *) get_slabclass(shadow_it->slabs_clsid);
-        node_t *search = search_tree(p->tree->root,shadow_it->last_seen_time);
-        if(search){
-            int y = calculate_reuse_distance(p->tree->root, search);
-            x = y / p->perslab;
-            //printf("reuse_distance: %d, page: %d\n",y,x);
+    slabclass_t *p = get_slabclass(shadow_it->slabs_clsid);
 
-            //pthread_mutex_unlock(&tree_lock);
+    // We need queue + tree stable while we compute and move-to-head.
+    pthread_mutex_lock(&p->shadowq_lock);
+    pthread_mutex_lock(&p->tree->lock);
 
-            //move to head
-            remove_shadowq_item(shadow_it,search);
-            insert_shadowq_item(shadow_it, shadow_it->slabs_clsid);
-
-            //update shadowq hit counters
-            if(x >= 0 && x <= 3999)
-                p->shadowq_hits[x]++;
-            p->q_misses++;
-            pthread_mutex_unlock(&tree_lock);
-        }
-        else
-        {
-            //printf("Not Found!    \n");
-            pthread_mutex_unlock(&tree_lock);
-            return NULL;
-        }
+    node_t *node = shadow_it->tree_node;
+    if (!node) {
+        pthread_mutex_unlock(&p->tree->lock);
+        pthread_mutex_unlock(&p->shadowq_lock);
+        shadow_release(shadow_it, hv);
+        return NULL;
     }
 
+    int y = calculate_reuse_distance(p->tree->root, node);
+    int x = y / p->perslab;
+
+    fix_weights(p->tree->root, node);
+    delete_tree_node(p->tree, node);
+    shadow_it->tree_node = NULL;
+
+    // Move-to-head in the queue (no re-locking)
+    remove_shadowq_item_locked(shadow_it);
+
+    // Update last_seen_time and reinsert into tree + queue as the newest
+    gettimeofday(&shadow_it->last_seen_time, NULL);
+
+    node_t *tn = new_tree_node(shadow_it->last_seen_time);
+    tn->shadowItem = shadow_it;
+    shadow_it->tree_node = tn;
+    insert_tree_node(p->tree, tn);
+
+    insert_shadowq_item_locked(shadow_it);
+
+    // Counters
+    if (x >= 0 && x <= 3999) p->shadowq_hits[x]++;
+    p->q_misses++;
+
+    pthread_mutex_unlock(&p->tree->lock);
+    pthread_mutex_unlock(&p->shadowq_lock);
+
+    shadow_release(shadow_it, hv);
     return shadow_it;
 }

@@ -15,6 +15,7 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <netinet/in.h>
+#include <ifaddrs.h>
 #include <event.h>
 #include <netdb.h>
 #include <pthread.h>
@@ -649,6 +650,7 @@ typedef struct {
     uint32_t q_misses;
 
     tree_t *tree;
+    pthread_mutex_t shadowq_lock;
 
 } slabclass_t;
 
@@ -730,7 +732,8 @@ void append_stat(const char *name, ADD_STAT add_stats, conn *c,
 
 enum store_item_type store_item(item *item, int comm, conn *c);
 
-shadow_item* create_shadow_item(item *it,u_int8_t clsid,u_int8_t nkey);
+void calculate_scores(uint64_t misses, double missRatio);
+shadow_item* create_shadow_item(item *it, uint8_t clsid, uint16_t nkey);
 
 #if HAVE_DROP_PRIVILEGES
 extern void drop_privileges(void);

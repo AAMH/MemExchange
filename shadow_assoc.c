@@ -298,3 +298,13 @@ void shadow_stop_assoc_maintenance_thread() {
     pthread_join(maintenance_tid, NULL);
 }
 
+void shadow_locks_init(void) {
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+
+    for (int i = 0; i < SHADOW_LOCKS; i++)
+        pthread_mutex_init(&shadow_locks[i], &attr);
+
+    pthread_mutexattr_destroy(&attr);
+}

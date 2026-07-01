@@ -34,7 +34,7 @@ void *thread_routine(){
     if(!issender){
         struct tracker trck = get_tracker();
         
-        void * ptr = shm_mallocAt(1046784);
+        void * ptr = shm_malloc_spare(1046784);
 
         //set_spare_mem(ptr,3);
         

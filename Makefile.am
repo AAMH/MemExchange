@@ -22,10 +22,11 @@ memcached_SOURCES = memcached.c memcached.h \
                     bipbuffer.c bipbuffer.h \
                     logger.c logger.h \
                     crawler.c crawler.h \
-                    itoa_ljust.c itoa_ljust.h\
-                    shm_malloc.c shm_malloc.h\
-		     shadows.c shadows.h\
-		     shadow_assoc.c shadow_assoc.h
+                    itoa_ljust.c itoa_ljust.h \
+                    shm_malloc.c shm_malloc.h \
+					shadows.c shadows.h \
+					shadow_assoc.c shadow_assoc.h \
+					rdma_util.c rdma_util.h rdma_assoc.c 
 
 if BUILD_CACHE
 memcached_SOURCES += cache.c
@@ -42,10 +43,10 @@ endif
 
 memcached_debug_SOURCES = $(memcached_SOURCES)
 memcached_CPPFLAGS = -DNDEBUG
-memcached_debug_LDADD = @PROFILER_LDFLAGS@
+memcached_debug_LDADD = @PROFILER_LDFLAGS@ -lrdmacm -libverbs -lrt
 memcached_debug_CFLAGS = @PROFILER_FLAGS@
 
-memcached_LDADD =
+memcached_LDADD = -lrdmacm -libverbs -lrt
 memcached_DEPENDENCIES =
 memcached_debug_DEPENDENCIES =
 CLEANFILES=

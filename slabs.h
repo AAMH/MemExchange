@@ -60,7 +60,6 @@ void slabs_rebalancer_pause(void);
 void slabs_rebalancer_resume(void);
 
 
-shadow_item* slabs_shadowq_lookup(char *key, const size_t nkey);
 shadow_item* get_shadowq_head(unsigned int id);
 void set_shadowq_head(shadow_item *elem, unsigned int id);
 shadow_item* get_shadowq_tail(unsigned int id);

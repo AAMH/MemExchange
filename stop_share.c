@@ -9,7 +9,7 @@
 #include <stdlib.h>
 #include <semaphore.h>
 
-#define n 15
+#define n 1
 
 char tracker_name[20], semaph_name[20], slab_name[20];
 

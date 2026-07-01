@@ -242,39 +242,6 @@ item_chunk *do_item_alloc_chunk(item_chunk *ch, const size_t bytes_remain) {
     return nch;
 }
 
-item *alloc_rem_item(char *key, const size_t nkey, unsigned int id, const int nbytes){
-
-    slabclass_t *p = (slabclass_t *) get_slabclass(id);
-    remote_item* r_it = NULL;
-    item *it = NULL;
-
-    if(p->sl_curr_r > 0){
-        r_it = slabs_remoteq_lookup(key, nkey);
-
-        if(!r_it && p->rslots != NULL){
-            r_it = (remote_item*) p->rslots;
-            p->rslots = r_it->next;
-            if (r_it->next) r_it->next->prev = NULL;
-            p->sl_curr_r--;
-
-            r_it->key = (char*) malloc((nkey+1) * sizeof(char));
-            memcpy(r_it->key, key, nkey);
-            r_it->nkey = nkey;
-            r_it->key[nkey] = '\0'; 
-
-            slabs_rdma_insert(r_it);
-            it = (item *) malloc(p->size);
-            memset(it, 0, p->size);
-            it->page_id = r_it->page_id;
-            it->r_it = r_it;
-            it->slabs_clsid = r_it->slabs_clsid;
-            r_it->nbytes = nbytes;
-        }
-    }
-
-    return it;
-}
-
 item *do_item_alloc(char *key, const size_t nkey, const unsigned int flags,
                     const rel_time_t exptime, const int nbytes) {
     uint8_t nsuffix;
@@ -308,20 +275,12 @@ item *do_item_alloc(char *key, const size_t nkey, const unsigned int flags,
             htotal += sizeof(uint64_t);
         }
         hdr_id = slabs_clsid(htotal);
-        it = alloc_rem_item(key, nkey, hdr_id, nbytes);
-        if(it != NULL)
-            remote_alloc = true;
-        else
         it = do_item_alloc_pull(htotal, hdr_id);
         /* setting ITEM_CHUNKED is fine here because we aren't LINKED yet. */
         if (it != NULL)
             it->it_flags |= ITEM_CHUNKED;
     } else {
-        it = alloc_rem_item(key, nkey, id, nbytes);
-        if(it != NULL)
-            remote_alloc = true;
-        else
-            it = do_item_alloc_pull(ntotal, id);
+        it = do_item_alloc_pull(ntotal, id);
     }
 
     if (it == NULL) {
@@ -349,10 +308,7 @@ item *do_item_alloc(char *key, const size_t nkey, const unsigned int flags,
         /* There is only COLD in compat-mode */
         id |= COLD_LRU;
     }
-    if(!remote_alloc){
-        it->slabs_clsid = id;
-        it->r_it = NULL;
-    }
+    it->slabs_clsid = id;
 
     DEBUG_REFCNT(it, '*');
     it->it_flags |= settings.use_cas ? ITEM_CAS : 0;
@@ -1145,12 +1101,13 @@ static int lru_pull_tail(const int orig_id, const int cur_lru,
                         itemstats[id].evicted_unfetched++;
                     }
                     
-                   
                     shadow_item* new_shadow_it = create_shadow_item(search, orig_id,search->nkey);
                     hv = hash(new_shadow_it->key, new_shadow_it->nkey);
+                    pthread_mutex_t *lk = shadow_hash_lock_for_hv(hv);
+                    pthread_mutex_lock(lk);
                     shadow_assoc_insert(new_shadow_it, hv);
-                    insert_shadowq_item(new_shadow_it,new_shadow_it->slabs_clsid);
-                                
+                    pthread_mutex_unlock(lk);
+                    insert_shadowq_item(new_shadow_it);
 
                     if ((search->it_flags & ITEM_ACTIVE)) {
                         itemstats[id].evicted_active++;
