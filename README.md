@@ -64,7 +64,6 @@ At a high level, MemExchange consists of four major components:
 ```
 MemExchange/
 ├── src/                 # MemExchange implementation
-├── tracker/             # Tracker source code
 ├── docs/                # Documentation
 ├── scripts/             # Automation and experiment scripts
 ├── analysis/            # R scripts and figure generation
@@ -98,6 +97,7 @@ sudo apt install rdma-core
 ### Compile MemExchange
 
 ```bash
+cd src/
 ./autogen
 ./configure CFLAGS="-w"
 make
