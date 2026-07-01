@@ -1911,7 +1911,7 @@ int on_event(struct rdma_cm_event *event){
 
 void calculate_scores(uint64_t misses, double missRatio){
 
-    if(mem_malloced_remote + mem_malloced > 1100 * 1024 * 1024) return; // temporary, used for stress test
+    // if(mem_malloced_remote + mem_malloced > 1100 * 1024 * 1024) return; // temporary, used for stress test
 
     double highest_mu = 0, lowest_mu = 1000000000, mu = 0;
     int temp = 0, cls_id = 0, cls_id2 = 0, page_id2 = -1, shadow_page_id = -1;
