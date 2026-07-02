@@ -73,7 +73,7 @@ Build MemExchange:
 
 ```bash
 cd src/
-./autogen
+./autogen.sh
 ./configure CFLAGS="-w"
 make
 ```
