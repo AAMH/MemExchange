@@ -6,17 +6,15 @@ These projects are maintained in separate repositories to keep this repository f
 
 ## Benchmark Repositories
 
-Add links here:
-
 ```text
 CloudSuite fork:
-https://github.com/<username>/<cloudsuite-repo>
+https://github.com/AAMH/Cloudsuite-Client.git
 
 mutilate fork:
-https://github.com/<username>/<mutilate-repo>
+https://github.com/AAMH/mutilate.git
 
 InfiniSwap fork:
-https://github.com/<username>/<infiniswap-repo>
+(https://github.com/AAMH/Infiniswap.git
 ```
 
 ## CloudSuite
