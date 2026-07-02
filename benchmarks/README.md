@@ -35,7 +35,7 @@ Example main phase:
 
 ```bash
 ./loader \
-  -a ../twitter_dataset/twitter_dataset_2 \
+  -a ../twitter_dataset/twitter_dataset_30x \
   -s tenants.txt \
   -g 1 \
   -T 1 \
