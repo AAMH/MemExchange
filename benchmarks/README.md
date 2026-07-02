@@ -6,16 +6,11 @@ These projects are maintained in separate repositories to keep this repository f
 
 ## Benchmark Repositories
 
-```text
-CloudSuite fork:
-https://github.com/AAMH/Cloudsuite-Client.git
+MemExchange was evaluated using modified versions of the following projects:
 
-mutilate fork:
-https://github.com/AAMH/mutilate.git
-
-InfiniSwap fork:
-(https://github.com/AAMH/Infiniswap.git
-```
+- **[CloudSuite Client (Modified)](https://github.com/AAMH/Cloudsuite-Client)** – Workload generation and benchmarking.
+- **[mutilate (Modified)](https://github.com/AAMH/mutilate)** – Facebook ETC-style workload generator.
+- **[InfiniSwap (Modified)](https://github.com/AAMH/Infiniswap)** – Comparison system used in the evaluation.
 
 ## CloudSuite
 
