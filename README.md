@@ -4,6 +4,23 @@ MemExchange is a distributed memory management system for multi-tenant cloud cac
 
 The system extends Memcached with distributed memory management, RDMA-backed remote access, tracker-based coordination, and automated benchmarking infrastructure. MemExchange was developed as part of my PhD research on cloud-scale memory management.
 
+## Memory Reallocation Mechanism
+
+MemExchange continuously reallocates memory according to the **marginal utility** of additional cache capacity.
+
+Each tenant periodically estimates its own **Miss Ratio Curve (MRC)** to determine how much its cache hit rate would improve if it received additional memory. This estimate represents the tenant's marginal utility of memory.
+
+When memory pressure occurs, tenants with the **highest expected benefit** become **victors** (memory receivers), while tenants with the **lowest marginal utility** become **victims** (memory donors). Rather than statically partitioning memory, MemExchange dynamically redistributes capacity where it provides the greatest improvement in cache performance.
+
+Memory trading occurs in two stages:
+
+1. **Local Memory Trading** – Memory is first reclaimed from over-provisioned tenants on the same physical server, similar to MemSweeper.
+
+2. **Cluster-wide Memory Trading (MTC)** – If local memory is insufficient, the MemExchange Tracker Communication (MTC) protocol locates remote victim tenants on other servers and allocates remote memory through RDMA.
+
+This hierarchical approach prioritizes inexpensive local reallocations while using remote memory only when necessary, allowing the cluster to behave as a unified memory pool without requiring application changes.
+
+Instead of maximizing memory utilization on individual machines, MemExchange maximizes the cluster-wide benefit of every gigabyte of memory.
 ## Key Features
 
 - Cluster-wide memory trading across physical servers
