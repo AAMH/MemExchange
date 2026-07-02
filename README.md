@@ -72,6 +72,7 @@ sudo apt install -y rdma-core
 Build MemExchange:
 
 ```bash
+cd src/
 ./autogen
 ./configure CFLAGS="-w"
 make
