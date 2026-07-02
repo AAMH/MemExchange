@@ -177,3 +177,10 @@ Citation and arXiv link will be added once available.
 ## Notes
 
 This repository contains research software. Some scripts assume CloudLab-specific paths, usernames, IP ranges, and experiment layouts. These are documented to make the evaluation workflow transparent, but may require modification for other environments.
+
+## Additional Documentation
+
+- **FAQ:** `docs/faq.md`
+- **Benchmarking:** `benchmarks/README.md`
+- **Experiment Scripts:** `scripts/README.md`
+- **Analysis & Figures:** `analysis/README.md`
