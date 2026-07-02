@@ -97,10 +97,6 @@ gcc -g -o stop_tracker stop_tracker.c shm_malloc.c -lrt -pthread
 
 Start the tracker:
 
-```bash
-./tracker 32000 0.25 0.25 0.25 0.25 MTC_ON
-```
-
 Usage:
 
 ```text
