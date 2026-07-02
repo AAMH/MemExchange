@@ -22,7 +22,6 @@ The system extends Memcached with distributed memory management, RDMA-backed rem
 ```text
 MemExchange/
 ├── src/                 # Modified Memcached / MemExchange source code
-├── tracker/             # Tracker and shared-memory management code
 ├── scripts/             # CloudLab and experiment automation scripts
 ├── analysis/            # R scripts for plots, figures, and statistics
 ├── benchmarks/          # Links and notes for benchmark repositories
