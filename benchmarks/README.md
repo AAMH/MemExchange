@@ -1,89 +1,72 @@
 # Benchmarks and Comparison Systems
 
-The MemExchange evaluation uses external benchmark and comparison-system
-repositories. They are kept separate from this repository so the MemExchange
-implementation, automation scripts, and analysis code remain focused.
+MemExchange uses external benchmark and comparison-system repositories for workload generation and baseline comparisons. They are kept separate from the main MemExchange codebase so each benchmark can carry its own build instructions, workload-specific notes, license files, and experiment scripts.
+
+This directory is therefore a guide to the benchmark repositories used in the evaluation, not a copy of their full documentation.
 
 ## External Repositories
 
-- **[CloudSuite Client (modified)](https://github.com/AAMH/Cloudsuite-Client)**
-  for Twitter-like cache workloads.
-- **[mutilate (modified)](https://github.com/AAMH/mutilate)** for
-  Facebook ETC-style cache workloads.
-- **[InfiniSwap (modified)](https://github.com/AAMH/Infiniswap)** as the
-  RDMA-based remote-memory comparison system.
+| Repository | Purpose |
+| --- | --- |
+| [CloudSuite Client](https://github.com/AAMH/Cloudsuite-Client) | Memcached client for CloudSuite/Twitter-style cache workloads. |
+| [mutilate](https://github.com/AAMH/mutilate) | Memcached load generator for Facebook ETC-style workloads. |
+| [InfiniSwap](https://github.com/AAMH/Infiniswap) | RDMA-based remote-memory comparison system. |
 
-## Workloads
+See each repository's own `README.md` for build dependencies, detailed command-line flags, cleanup steps, and full workload examples.
 
-The paper evaluates MemExchange with three main workload families:
+## Workload Coverage
 
-- **CloudSuite / Twitter:** skewed key access with heterogeneous object sizes.
-- **mutilate / Facebook ETC Uniform:** low-locality access with fixed-size
-  objects.
-- **mutilate / Facebook ETC Zipf:** high-locality access with skewed demand.
+### CloudSuite Client
 
-The experiments compare static Memcached, local-only dynamic resizing
-(MemSweeper-style behavior), MemExchange, and InfiniSwap where applicable.
+The modified CloudSuite client is used for Twitter-like cache workloads with heterogeneous object sizes and configurable key-access behavior.
 
-## CloudSuite Example
+Supported modes include:
 
-Example warm-up and scaling command:
+- **Skewed CloudSuite/Twitter workload:** default CDF-based key sampling.
+- **Sequential dataset workload:** enabled with `-q`.
+- **Synthetic fixed-size workload:** enabled with `-y` or `-b`, using generated fixed-size keys.
 
-```bash
-./loader \
-  -a ../twitter_dataset/twitter_dataset_unscaled \
-  -o ../twitter_dataset/twitter_dataset_30x \
-  -s tenants.txt \
-  -w 4 \
-  -S 30 \
-  -D 3357 \
-  -j \
-  -T 1 \
-  -r 400000
-```
+The client supports preload/warmup with `-j`, tenant configuration through `tenants.txt`, dataset scaling with `-S` and `-o`, and CSV stats output with `-C`.
 
-Example main phase:
+For exact preload and main-phase commands, see the CloudSuite Client repository:
 
-```bash
-./loader \
-  -a ../twitter_dataset/twitter_dataset_30x \
-  -s tenants.txt \
-  -g 1 \
-  -T 1 \
-  -c 25 \
-  -w 1 \
-  -r 25000
-```
+[https://github.com/AAMH/Cloudsuite-Client](https://github.com/AAMH/Cloudsuite-Client)
 
-## mutilate Example
+### mutilate
 
-```bash
-./mutilate \
-  -s localhost:$port \
-  -t 5000 \
-  --keysize=fb_key \
-  --valuesize=fb_value \
-  --iadist=fb_ia \
-  --records=3000000 \
-  -q 20000 \
-  -c 25
-```
+The modified `mutilate` repository is used for Facebook ETC-style memcached workloads.
 
-## Tenant Configuration
+The local version includes a Zipfian record-ID sampler for the main phase. This fixes the original behavior where record IDs were selected uniformly even when using the hard-coded Facebook ETC distributions:
 
-CloudSuite uses a tenant configuration file such as `tenants.txt`.
+- `--keysize=fb_key`
+- `--valuesize=fb_value`
+- `--iadist=fb_ia`
 
-Example line:
+By default, mutilate loads the configured record set into memcached first, then runs a GET-only main phase unless `--update` is set above zero. Misses are counted and reported; in this modified version, automatic SET-on-miss refill is disabled.
 
-```text
-localhost, 11212, 1
-```
+For build, cleanup, and ETC workload examples, see the mutilate repository:
 
-Fields:
+[https://github.com/AAMH/mutilate](https://github.com/AAMH/mutilate)
 
-```text
-ip, port, rps_ratio
-```
+### InfiniSwap
 
-The `rps_ratio` controls the fraction of the base request rate assigned to that
-tenant.
+InfiniSwap is used as the RDMA-based remote-memory comparison system where applicable. Its setup and run procedure depends on the RDMA/CloudLab environment, so the authoritative instructions are kept in the InfiniSwap repository:
+
+[https://github.com/AAMH/Infiniswap](https://github.com/AAMH/Infiniswap)
+
+## Evaluation Use
+
+The MemExchange evaluation compares cache behavior and memory-management policies across workload families such as:
+
+- CloudSuite/Twitter skewed cache workloads.
+- CloudSuite sequential or synthetic workloads when fixed access patterns are needed.
+- Facebook ETC-style workloads generated by mutilate.
+
+The comparison configurations include static Memcached, local-only dynamic resizing behavior, MemExchange, and InfiniSwap where applicable.
+
+## Notes
+
+- Keep benchmark-specific commands in the benchmark repositories so they stay close to the code they exercise.
+- Keep generated datasets, build artifacts, and machine-specific output files out of this main repository unless they are intentionally part of an experiment artifact.
+- When reproducing experiments, record the exact benchmark commit, workload command, tenant/server file, memcached memory size, and CSV output path.
+
