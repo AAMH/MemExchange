@@ -37,13 +37,14 @@ flowchart LR
     G --> H["Remote page becomes cache overflow capacity"]
 ```
 
-## Paper Results
+## Paper and Results
 
-MemExchange is described in the accompanying paper:
+MemExchange is described in the in-progress paper:
 
 **MemExchange: Cloud-Scale Memory Trading**
 
-AmirHossein Seyri, Abhisek Pan, and Balajee Vamanan
+Publication details, arXiv link, and citation information will be added here
+once they are available.
 
 The paper evaluates MemExchange with CloudSuite and mutilate on CloudLab,
 including medium-scale experiments and a 100-server rack-scale deployment.
