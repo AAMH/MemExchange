@@ -203,7 +203,7 @@ Useful entry points:
   and InfiniSwap repositories used in the evaluation.
 - [analysis/README.md](analysis/README.md): R scripts for figures, summaries,
   and statistical analysis.
-- [docs/faq.md](docs/faq.md): methodology notes and common questions.
+- [docs/README.md](docs/README.md): methodology notes and common questions.
 
 ## Soft-RoCE / RXE
 
