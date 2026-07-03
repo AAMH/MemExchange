@@ -1,20 +1,31 @@
 # Benchmarks and Comparison Systems
 
-MemExchange was evaluated using modified versions of CloudSuite and mutilate. InfiniSwap was used as a comparison system.
+The MemExchange evaluation uses external benchmark and comparison-system
+repositories. They are kept separate from this repository so the MemExchange
+implementation, automation scripts, and analysis code remain focused.
 
-These projects are maintained in separate repositories to keep this repository focused on the MemExchange implementation.
+## External Repositories
 
-## Benchmark Repositories
+- **[CloudSuite Client (modified)](https://github.com/AAMH/Cloudsuite-Client)**
+  for Twitter-like cache workloads.
+- **[mutilate (modified)](https://github.com/AAMH/mutilate)** for
+  Facebook ETC-style cache workloads.
+- **[InfiniSwap (modified)](https://github.com/AAMH/Infiniswap)** as the
+  RDMA-based remote-memory comparison system.
 
-MemExchange was evaluated using modified versions of the following projects:
+## Workloads
 
-- **[CloudSuite Client (Modified)](https://github.com/AAMH/Cloudsuite-Client)** – Workload generation and benchmarking.
-- **[mutilate (Modified)](https://github.com/AAMH/mutilate)** – Facebook ETC-style workload generator.
-- **[InfiniSwap (Modified)](https://github.com/AAMH/Infiniswap)** – Comparison system used in the evaluation.
+The paper evaluates MemExchange with three main workload families:
 
-## CloudSuite
+- **CloudSuite / Twitter:** skewed key access with heterogeneous object sizes.
+- **mutilate / Facebook ETC Uniform:** low-locality access with fixed-size
+  objects.
+- **mutilate / Facebook ETC Zipf:** high-locality access with skewed demand.
 
-CloudSuite is used to generate cache workloads based on a Twitter-like dataset.
+The experiments compare static Memcached, local-only dynamic resizing
+(MemSweeper-style behavior), MemExchange, and InfiniSwap where applicable.
+
+## CloudSuite Example
 
 Example warm-up and scaling command:
 
@@ -44,11 +55,7 @@ Example main phase:
   -r 25000
 ```
 
-## mutilate
-
-mutilate is used to simulate Facebook ETC-style cache workloads.
-
-Example:
+## mutilate Example
 
 ```bash
 ./mutilate \
@@ -78,4 +85,5 @@ Fields:
 ip, port, rps_ratio
 ```
 
-The `rps_ratio` controls the fraction of the base request rate assigned to that tenant.
+The `rps_ratio` controls the fraction of the base request rate assigned to that
+tenant.

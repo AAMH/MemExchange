@@ -1,50 +1,101 @@
 # MemExchange
 
-MemExchange is a distributed memory management system for multi-tenant cloud caching environments. It enables cluster-wide memory trading using RDMA, allowing memory-constrained cache tenants to transparently use unused memory on remote servers while preserving low request latency and tenant isolation.
+MemExchange is a research prototype for **cloud-scale memory trading** in
+multi-tenant in-memory caches. It extends Memcached so that cache tenants can
+temporarily borrow unused memory from other tenants, including tenants on other
+physical servers, while preserving the familiar Memcached interface for clients.
 
-The system extends Memcached with distributed memory management, RDMA-backed remote access, tracker-based coordination, and automated benchmarking infrastructure. MemExchange was developed as part of my PhD research on cloud-scale memory management.
+The system is designed for the common cloud scenario where memory is
+over-provisioned for peak demand: one tenant may be evicting useful objects
+because its cache is too small, while another tenant holds idle DRAM elsewhere
+in the cluster. MemExchange turns that stranded capacity into a logical
+cluster-wide memory pool and reallocates it according to measured cache utility.
 
-## Memory Reallocation Mechanism
+## What MemExchange Does
 
-MemExchange continuously reallocates memory according to the **marginal utility** of additional cache capacity.
+- Estimates each tenant's memory demand online using Miss Ratio Curves (MRCs)
+  built from shadow queues.
+- Scores tenants by marginal utility, so memory goes to tenants that are
+  expected to gain the most hit-rate improvement.
+- Reclaims low-utility pages from over-provisioned tenants, first locally and
+  then across the cluster.
+- Uses RDMA as a remote overflow tier, allowing a tenant to store colder cache
+  objects in memory physically owned by another server.
+- Coordinates page transfers through the MemExchange Tracker Communication
+  (MTC) protocol, avoiding a centralized broker.
+- Keeps hot data local when possible while using remote memory to reduce cache
+  misses for memory-constrained tenants.
 
-Each tenant periodically estimates its own **Miss Ratio Curve (MRC)** to determine how much its cache hit rate would improve if it received additional memory. This estimate represents the tenant's marginal utility of memory.
+```mermaid
+flowchart LR
+    A["Tenant observes shadow hits"] --> B["Computes marginal utility"]
+    B --> C["Local tracker selects victor"]
+    C --> D{"Local donor available?"}
+    D -- Yes --> E["Reallocate local page"]
+    D -- No --> F["MTC discovers remote victim"]
+    F --> G["Exchange RDMA metadata"]
+    G --> H["Remote page becomes cache overflow capacity"]
+```
 
-When memory pressure occurs, tenants with the **highest expected benefit** become **victors** (memory receivers), while tenants with the **lowest marginal utility** become **victims** (memory donors). Rather than statically partitioning memory, MemExchange dynamically redistributes capacity where it provides the greatest improvement in cache performance.
+## Paper Results
 
-Memory trading occurs in two stages:
+MemExchange is described in the accompanying paper:
 
-1. **Local Memory Trading** – Memory is first reclaimed from over-provisioned tenants on the same physical server, similar to MemSweeper.
+**MemExchange: Cloud-Scale Memory Trading**
 
-2. **Cluster-wide Memory Trading (MTC)** – If local memory is insufficient, the MemExchange Tracker Communication (MTC) protocol locates remote victim tenants on other servers and allocates remote memory through RDMA.
+AmirHossein Seyri, Abhisek Pan, and Balajee Vamanan
 
-This hierarchical approach prioritizes inexpensive local reallocations while using remote memory only when necessary, allowing the cluster to behave as a unified memory pool without requiring application changes.
+The paper evaluates MemExchange with CloudSuite and mutilate on CloudLab,
+including medium-scale experiments and a 100-server rack-scale deployment.
+Headline results include:
 
-Instead of maximizing memory utilization on individual machines, MemExchange maximizes the cluster-wide benefit of every gigabyte of memory.
-## Key Features
+- Up to **2.3x lower remote-access overhead** than TCP-based remote cache access.
+- Up to **63.1% miss-rate reduction** for memory-constrained tenants under the
+  Twitter workload compared with static Memcached.
+- Roughly **50% higher cluster-wide memory utilization** in medium-scale
+  experiments by reclaiming idle memory from over-provisioned tenants.
+- **53 GB reallocated cluster-wide** in a 100-server experiment, including 32 GB
+  served remotely over RDMA.
+- **13.25% higher memory utilization at rack scale**, with most
+  under-provisioned tenants reaching sustained high hit rates after convergence.
 
-- Cluster-wide memory trading across physical servers
-- RDMA-backed remote memory access
-- Application-layer remote memory management
-- Memcached integration
-- Tracker-based local and remote memory coordination
-- Greedy tenant mode for elastic cache resizing
-- Support for enabling/disabling cluster-wide trading with `MTC_ON` / `MTC_OFF`
-- Automation scripts for CloudLab experiments
-- Benchmarking support for CloudSuite and mutilate
-- R scripts for analysis, plots, and statistics
-
-## Repository Structure
+## Repository Layout
 
 ```text
 MemExchange/
-├── src/                 # Modified Memcached / MemExchange source code
-├── scripts/             # CloudLab and experiment automation scripts
-├── analysis/            # R scripts for plots, figures, and statistics
-├── benchmarks/          # Links and notes for benchmark repositories
-├── docs/                # FAQ and additional documentation
-└── README.md
+|-- src/                 # Modified Memcached / MemExchange implementation
+|-- scripts/             # CloudLab deployment and experiment automation
+|-- analysis/            # R scripts for paper figures and statistics
+|-- benchmarks/          # Links and notes for benchmark repositories
+|-- docs/                # FAQ and supporting documentation
+|-- LICENSE
+`-- README.md
 ```
+
+Benchmark drivers and comparison systems are maintained as separate
+repositories; see [benchmarks/README.md](benchmarks/README.md). The scripts in
+this repository assume the CloudLab topology and paths used for the paper, so
+they should be treated as reproducibility artifacts rather than turnkey
+production tooling.
+
+## System Overview
+
+Each physical server runs a lightweight **Tracker** process and one or more
+MemExchange tenants. The Tracker initializes a shared-memory region, tracks
+tenant allocations, and coordinates local and remote memory trading.
+
+Memory trading proceeds in two levels:
+
+1. **Local trading:** if a memory-constrained tenant can benefit from more
+   capacity, MemExchange first tries to reclaim a low-utility page from another
+   tenant on the same server.
+2. **Cluster-wide trading:** if local memory is insufficient, Trackers use MTC
+   to find a remote victim tenant. The victim exposes a cleared page through
+   RDMA, and the victor uses that page as remote cache capacity.
+
+Remote pages are integrated into Memcached as an overflow tier. Local lookups
+are attempted first; remote hits are served with one-sided RDMA reads, and
+remote inserts use RDMA writes.
 
 ## Build
 
@@ -63,7 +114,8 @@ sudo apt install -y \
     screen
 ```
 
-If running on a node without hardware RDMA support and using Soft-RoCE/RXE, also install:
+If you are testing without hardware RDMA and plan to use Soft-RoCE/RXE, also
+install:
 
 ```bash
 sudo apt install -y rdma-core
@@ -84,18 +136,18 @@ Clean build artifacts:
 make clean
 ```
 
-## Tracker
+## Running a Tracker
 
-The tracker initializes the shared-memory region and coordinates memory trading between tenants. It must be started before running MemExchange tenants.
+The tracker must be started before MemExchange tenants. It creates the
+shared-memory region and controls whether the node participates in
+cluster-wide memory trading.
 
-Compile the tracker binaries:
+Compile the tracker binaries from `src/`:
 
 ```bash
 gcc -g -o tracker start_tracker.c shm_malloc.c -lrt -pthread
 gcc -g -o stop_tracker stop_tracker.c shm_malloc.c -lrt -pthread
 ```
-
-Start the tracker:
 
 Usage:
 
@@ -109,67 +161,53 @@ Example:
 ./tracker 32000 0.25 0.25 0.25 0.25 MTC_ON
 ```
 
-`MTC_ON` enables cluster-wide memory trading. Tenants may use remote memory, and the node may lend unused memory to other machines.
+- `MTC_ON` enables cluster-wide trading. Local tenants may borrow remote memory,
+  and the node may lend idle memory to tenants on other servers.
+- `MTC_OFF` restricts trading to local tenants on the same physical server.
 
-`MTC_OFF` disables cluster-wide memory trading. Tenants are limited to local memory trading only and do not participate in remote memory exchange.
-
-After tenants finish, clean up the shared-memory region:
+When tenants finish, clean up the shared-memory region:
 
 ```bash
 ./stop_tracker
 ```
 
-## Running MemExchange Tenants
+## Running Tenants
 
-Example tenant:
+Start a MemExchange tenant similarly to Memcached:
 
 ```bash
 ./memcached -v -p 11212 -t 4 -m 4096 -G
 ```
 
-The `-G` flag enables greedy mode, allowing a tenant to grow beyond its initial memory allocation when additional memory becomes available through MemExchange.
+The `-G` flag enables greedy mode, allowing a tenant to grow beyond its initial
+allocation when MemExchange identifies useful additional capacity.
 
-## Benchmarks
+## Experiments and Reproducibility
 
-MemExchange was evaluated using modified versions of:
+The evaluation workflow used for the paper is split across this repository and
+the benchmark repositories:
 
-- CloudSuite
-- mutilate
-- InfiniSwap, used as a comparison system
+1. Configure CloudLab nodes and RDMA networking.
+2. Start trackers and MemExchange tenants on cache servers.
+3. Run CloudSuite or mutilate clients against the tenant set.
+4. Collect logs, MTC statistics, latency, hit-rate, and utilization data.
+5. Generate figures and statistical summaries with the R scripts in
+   `analysis/`.
 
-These are maintained as separate repositories. See `benchmarks/README.md` for links and notes.
+Useful entry points:
 
-## Experiment Scripts
-
-The `scripts/` directory contains automation for CloudLab deployment, benchmark execution, RPS sweeps, and monitoring. See `scripts/README.md`.
-
-## Analysis
-
-The `analysis/` directory contains R code used to generate plots, figures, and statistics for the paper/thesis. See `analysis/README.md`.
-
-## Debugging
-
-AddressSanitizer is useful for debugging memory corruption.
-
-Example flags:
-
-```makefile
-CFLAGS += -fsanitize=address -fno-omit-frame-pointer
-LDFLAGS += -fsanitize=address
-```
-
-For undefined behavior checks:
-
-```makefile
-CFLAGS += -fsanitize=undefined
-LDFLAGS += -fsanitize=undefined
-```
+- [scripts/README.md](scripts/README.md): CloudLab setup, benchmark launchers,
+  RPS sweeps, and MTC statistics logging.
+- [benchmarks/README.md](benchmarks/README.md): modified CloudSuite, mutilate,
+  and InfiniSwap repositories used in the evaluation.
+- [analysis/README.md](analysis/README.md): R scripts for figures, summaries,
+  and statistical analysis.
+- [docs/faq.md](docs/faq.md): methodology notes and common questions.
 
 ## Soft-RoCE / RXE
 
-On machines without hardware RDMA NICs, MemExchange can be tested using Soft-RoCE/RXE.
-
-Example:
+MemExchange can be tested with Software RDMA on machines without RDMA-capable
+NICs. Example setup:
 
 ```bash
 echo "mlx5_core.rdma.2" | sudo tee /sys/bus/auxiliary/drivers/mlx5_ib.rdma/unbind
@@ -179,21 +217,12 @@ rdma link
 
 Adjust the network interface name for your machine.
 
-## Publication
-
-MemExchange was developed as part of the paper:
-
-**MemExchange: Cloud-Scale Memory Trading**
-
-Citation and arXiv link will be added once available.
-
 ## Notes
 
-This repository contains research software. Some scripts assume CloudLab-specific paths, usernames, IP ranges, and experiment layouts. These are documented to make the evaluation workflow transparent, but may require modification for other environments.
+This is research software. Some scripts contain CloudLab-specific paths,
+usernames, IP ranges, interface names, and experiment layouts. They are included
+to make the evaluation workflow transparent, but they will need adjustment for
+other environments.
 
-## Additional Documentation
-
-- **FAQ:** `docs/faq.md`
-- **Benchmarking:** `benchmarks/README.md`
-- **Experiment Scripts:** `scripts/README.md`
-- **Analysis & Figures:** `analysis/README.md`
+The implementation is based on Memcached and retains the upstream Memcached
+license in [LICENSE](LICENSE).
