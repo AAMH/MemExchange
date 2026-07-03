@@ -92,16 +92,53 @@ MemExchange supports Software RDMA (Soft-RoCE/RXE), allowing the system to be ev
 
 ## Future Work
 
+### What are the main future-work directions?
+
+The current prototype focuses on demonstrating that cluster-wide, utility-driven memory trading is practical for multi-tenant caches. Several extensions would make the system more complete:
+
+- Promoting frequently accessed remote objects back into local memory.
+- Making placement aware of object size, so large or latency-sensitive objects are less likely to remain remote.
+- Reclaiming or rebalancing remote pages when tenants leave, workloads shift, or remote memory becomes more valuable elsewhere.
+- Improving recovery after tracker, tenant, or server failures.
+- Reducing convergence time with predictive or history-aware victim selection.
+- Applying the marginal-utility framework to other memory-backed systems where resource benefit can be quantified.
+
+---
+
+### Why doesn't MemExchange automatically move hot remote items back to local memory?
+
+In the current design, remote memory primarily acts as an overflow tier. Once a page is allocated remotely, MemExchange can use it to absorb objects that would otherwise be evicted, but it does not continuously migrate individual hot objects back into local memory.
+
+This keeps the prototype simpler and makes the evaluation focus on the core question: whether cluster-wide memory trading improves hit rate and utilization enough to justify RDMA-backed remote access. A production system could add adaptive migration, where hot remote items are promoted locally and persistently cold local items are pushed out or evicted.
+
+---
+
+### What happens to remote pages over long-running workloads?
+
+The prototype is designed around controlled experiments where workload phases and tenant membership are known. In longer-running deployments, remote pages may need more active lifecycle management.
+
+For example, if a tenant's demand decreases, a previously useful remote page might be better reclaimed or assigned to another tenant. If a victim tenant fails or leaves, pages exposed to remote tenants may also need cleanup. Future work could add explicit remote-page recycling, orphan detection, and rebalancing policies.
+
+---
+
 ### Does MemExchange currently tolerate server failures?
 
-The current implementation focuses on evaluating cluster-wide memory management rather than fault tolerance.
+The paper design localizes failures: if a tracker stops participating, the rest of the cluster can continue coordinating through their own trackers, and affected tenants can fall back toward local Memcached-like behavior. However, the current research prototype is primarily evaluated for memory-management behavior rather than full production fault tolerance.
 
-Future work includes recovery mechanisms for tracker failures, handling orphaned remote pages after server failures, and improving resilience under dynamic cluster membership.
+Future work includes stronger recovery for tracker failures, cleanup of orphaned remote pages, handling dynamic cluster membership, and preserving useful remote-memory state across failures when safe.
+
+---
+
+### Could MemExchange converge faster?
+
+Possibly. MemExchange trades memory one page at a time and makes decisions from current marginal-utility scores. This conservative approach avoids large, stale reallocations when workloads are changing, but it can take time to converge in large deployments.
+
+Future versions could use historical scores, workload prediction, or proactive victim selection to shorten reallocation delay while still preserving the core goal: move memory only when the expected cache benefit justifies it.
 
 ---
 
 ### Can MemExchange be integrated with systems other than Memcached?
 
-The implementation presented in this repository targets Memcached because it provides a realistic and widely used cloud caching platform.
+The implementation in this repository targets Memcached because it is a realistic and widely used cloud caching platform with explicit memory-management behavior.
 
-Many of the core ideas—including cluster-wide memory trading, marginal-utility-based memory allocation, and RDMA-backed remote memory—are not inherently specific to Memcached and could be adapted to other distributed in-memory systems.
+The broader ideas are not inherently Memcached-specific. Cluster-wide memory trading, marginal-utility-based allocation, and RDMA-backed remote capacity could be adapted to other distributed in-memory systems, especially when the system can estimate the benefit of additional memory through hit rate, latency, throughput, or another measurable utility signal.
