@@ -183,6 +183,26 @@ Start a MemExchange tenant similarly to Memcached:
 The `-G` flag enables greedy mode, allowing a tenant to grow beyond its initial
 allocation when MemExchange identifies useful additional capacity.
 
+## Debugging Builds
+
+AddressSanitizer (ASan) is useful for tracking memory corruption, use-after-free
+bugs, and other allocator-related issues while developing or debugging
+MemExchange.
+
+Example ASan flags:
+
+```makefile
+CFLAGS += -fsanitize=address -fno-omit-frame-pointer
+LDFLAGS += -fsanitize=address
+```
+
+For undefined behavior checks, use UBSan:
+
+```makefile
+CFLAGS += -fsanitize=undefined
+LDFLAGS += -fsanitize=undefined
+```
+
 ## Experiments and Reproducibility
 
 The evaluation workflow used for the paper is split across this repository and
