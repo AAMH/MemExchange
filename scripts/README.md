@@ -20,6 +20,12 @@ IP addresses, interface names, and node assignments.
 - `mtc_stats_logger.sh`: logs MTC-related network and RDMA statistics over
   time.
 
+Example MTC statistics logger command:
+
+```bash
+./mtc_stats_logger.sh --iface enp65s0f0np0 --ibdev mlx5_2 --ibport 1
+```
+
 ## Typical Workflow
 
 ```text
