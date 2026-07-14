@@ -39,12 +39,26 @@ flowchart LR
 
 ## Paper and Results
 
-MemExchange is described in the in-progress paper:
+MemExchange is described in the arXiv paper:
 
-**MemExchange: Cloud-Scale Memory Trading**
+**[MemExchange: Cloud-Scale Memory Trading](https://arxiv.org/abs/2607.11579)**
 
-Publication details, arXiv link, and citation information will be added here
-once they are available.
+AmirHossein Seyri, Abhisek Pan, and Balajee Vamanan
+
+If you use this repository or build on MemExchange, please cite:
+
+```bibtex
+@misc{seyri2026memexchange,
+  title = {MemExchange: Cloud-Scale Memory Trading},
+  author = {Seyri, AmirHossein and Pan, Abhisek and Vamanan, Balajee},
+  year = {2026},
+  eprint = {2607.11579},
+  archivePrefix = {arXiv},
+  primaryClass = {cs.DC},
+  doi = {10.48550/arXiv.2607.11579},
+  url = {https://arxiv.org/abs/2607.11579}
+}
+```
 
 The paper evaluates MemExchange with CloudSuite and mutilate on CloudLab,
 including medium-scale experiments and a 100-server rack-scale deployment.
