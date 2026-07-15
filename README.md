@@ -1,9 +1,9 @@
 # MemExchange
 
-MemExchange is a research prototype for **cloud-scale memory trading** in
-multi-tenant in-memory caches. It extends Memcached so that cache tenants can
-temporarily borrow unused memory from other tenants, including tenants on other
-physical servers, while preserving the familiar Memcached interface for clients.
+MemExchange is a research prototype for **utility-driven distributed memory
+reallocation** in multi-tenant datacenter caches. It extends Memcached so cache
+tenants can trade unused memory across servers using RDMA-backed remote
+capacity, while preserving the familiar Memcached interface for clients.
 
 The system is designed for the common cloud scenario where memory is
 over-provisioned for peak demand: one tenant may be evicting useful objects
@@ -21,8 +21,8 @@ cluster-wide memory pool and reallocates it according to measured cache utility.
   then across the cluster.
 - Uses RDMA as a remote overflow tier, allowing a tenant to store colder cache
   objects in memory physically owned by another server.
-- Coordinates page transfers through the MemExchange Tracker Communication
-  (MTC) protocol, avoiding a centralized broker.
+- Coordinates distributed reallocation through the MemExchange Tracker
+  Communication (MTC) protocol, avoiding a centralized broker.
 - Keeps hot data local when possible while using remote memory to reduce cache
   misses for memory-constrained tenants.
 
@@ -41,7 +41,7 @@ flowchart LR
 
 MemExchange is described in the arXiv paper:
 
-**[MemExchange: Cloud-Scale Memory Trading](https://arxiv.org/abs/2607.11579)**
+**[MemExchange: Utility-Driven Distributed Memory Reallocation for Multi-Tenant Datacenters](https://arxiv.org/abs/2607.11579)**
 
 AmirHossein Seyri, Abhisek Pan, and Balajee Vamanan
 
@@ -49,7 +49,7 @@ If you use this repository or build on MemExchange, please cite:
 
 ```bibtex
 @misc{seyri2026memexchange,
-  title = {MemExchange: Cloud-Scale Memory Trading},
+  title = {MemExchange: Utility-Driven Distributed Memory Reallocation for Multi-Tenant Datacenters},
   author = {Seyri, AmirHossein and Pan, Abhisek and Vamanan, Balajee},
   year = {2026},
   eprint = {2607.11579},
