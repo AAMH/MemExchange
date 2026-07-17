@@ -241,8 +241,15 @@ Useful entry points:
 
 ## Soft-RoCE / RXE
 
-MemExchange can be tested with Software RDMA on machines without RDMA-capable
-NICs. Example setup:
+MemExchange can be tested with Software RDMA (Soft-RoCE/RXE), both on machines
+without RDMA-capable NICs and on RDMA-capable machines where RXE behavior needs
+to be tested explicitly.
+
+### Testing RXE on a Machine with Hardware RDMA
+
+When a hardware RDMA link and an RXE link use the same network interface, RDMA
+connections may continue to select the hardware device. To ensure the test uses
+RXE, first unbind the existing hardware RDMA device and then add the RXE link:
 
 ```bash
 echo "mlx5_core.rdma.2" | sudo tee /sys/bus/auxiliary/drivers/mlx5_ib.rdma/unbind
@@ -250,7 +257,22 @@ sudo rdma link add rxe_0 type rxe netdev enp65s0f0np0
 rdma link
 ```
 
-Adjust the network interface name for your machine.
+Both `mlx5_core.rdma.2` and `enp65s0f0np0` are machine-specific examples. Find
+the corresponding hardware RDMA device and network interface on your server
+before running these commands. Unbinding the device temporarily disables its
+hardware RDMA path and may interrupt other RDMA workloads on that interface.
+
+### Using RXE on a Machine without Hardware RDMA
+
+No hardware device needs to be unbound. Add an RXE link directly to an existing
+Ethernet interface:
+
+```bash
+sudo rdma link add rxe_0 type rxe netdev enpX
+rdma link
+```
+
+Replace `enpX` with the network interface used for the MemExchange test.
 
 ## Notes
 
